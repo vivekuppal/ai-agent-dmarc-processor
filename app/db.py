@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import (
     AsyncSession,
     create_async_engine,
     async_sessionmaker)
+from contextlib import asynccontextmanager
 from pydantic_settings import BaseSettings
 from app.models import DMARCReport
 import os
@@ -39,6 +40,16 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         finally:
             # session closed by context manager
             ...
+
+
+@asynccontextmanager
+async def maybe_transaction(session):
+    if session.in_transaction():
+        # Reuse existing transaction
+        yield session
+    else:
+        async with session.begin():
+            yield session
 
 
 # Example usage

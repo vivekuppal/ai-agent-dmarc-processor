@@ -9,6 +9,7 @@ from datetime import datetime
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
 from google.cloud import storage
 from sqlalchemy.ext.asyncio import AsyncSession, AsyncEngine
+from sqlalchemy import select, func
 
 from app.processor import process_notification
 from app.utils import verify_pubsub_jwt_if_required, json_dumps
@@ -21,6 +22,14 @@ if os.path.exists('.env'):
     from dotenv import load_dotenv
     load_dotenv()
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+    ]
+)
 logger = logging.getLogger("uvicorn")
 logger.setLevel(logging.INFO)
 
@@ -48,16 +57,6 @@ async def lifespan(local_app: FastAPI):
 
 
 app = FastAPI(title=COMPONENT_NAME, lifespan=lifespan)
-
-
-def monitor_gcs_bucket(db: AsyncSession):
-    """Monitor GCS bucket for new DMARC reports"""
-    try:
-        from services.gcs_monitor import GCSMonitor
-        monitor = GCSMonitor(db)
-        monitor.process_new_files()
-    except Exception as e:
-        logger.error(f"Error monitoring GCS bucket: {str(e)}")
 
 
 def get_storage() -> storage.Client:
@@ -161,20 +160,41 @@ def health():
         }
 
 
-@app.route('/status')
-def status(db: AsyncSession = Depends(get_db)):
+@app.get('/')
+def home():
+    """Home endpoint for DMARC Report Processor AI agent"""
+    return {
+        'name': 'DMARC Report Processor AI Agent',
+        'version': '1.0.0',
+        'description': 'Automated DMARC report processing service',
+        'status': 'running',
+        'endpoints': {
+            '/': 'Home page. Provides a list of available endpoints.',
+            '/health': 'Health check endpoint',
+            '/status': 'Application status and statistics',
+            '/test-gcs': 'Test Google Cloud Storage connection',
+            '/list-all-bucket-files': 'List all files in the GCS bucket',
+            '/trigger-monitoring': 'Manual Trigger for processing files in GCS bucket',
+            '/clear-gsm-cache': 'Clear cached Google Cloud Secret Manager secrets',
+            '/local-test': 'Process a local DMARC XML file for testing',
+            '/test-db': 'Test database connectivity',
+            '/trigger': 'Pub/Sub push endpoint for GCS events'
+        }
+    }
+
+
+@app.get('/status')
+async def status(db: AsyncSession = Depends(get_db)):
     """Application status endpoint"""
-    from sqlalchemy.orm import sessionmaker
-    from models import DMARCReport, DMARCReportDetail, ProcessedFile
+    from app.models import DMARCReport, DMARCReportDetail, ProcessedFile
 
     try:
-        Session = sessionmaker(bind=db.engine)
-        session = Session()
-
-        dmarc_count = session.query(DMARCReport).count()
-        detail_count = session.query(DMARCReportDetail).count()
-        processed_count = session.query(ProcessedFile).count()
-        session.close()
+        dmarc_count = await db.scalar(
+            select(func.count()).select_from(DMARCReport))
+        detail_count = await db.scalar(
+            select(func.count()).select_from(DMARCReportDetail))
+        processed_count = await db.scalar(
+            select(func.count()).select_from(ProcessedFile))
 
         status_info = {
             'status': 'running',
@@ -185,47 +205,27 @@ def status(db: AsyncSession = Depends(get_db)):
                 'processed_files': processed_count
             },
             'configuration': {
-                'google_bucket': os.environ.get('GOOGLE_BUCKET', 'Not configured'),
-                'file_check_frequency': os.environ.get('FILE_CHECK_FREQUENCY_SECONDS', '30') + ' seconds'
+                'component_name': COMPONENT_NAME,
+                'expected_event_type': EXPECTED_EVENT_TYPE,
+                'object_prefix': OBJECT_PREFIX,
+                'output_prefix': OUTPUT_PREFIX
             }
         }
 
         return status_info
 
     except Exception as e:
-        return {'status': 'error', 'error': str(e)}, 500
+        logger.exception("status_failed")
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-@app.route('/test-gcs')
-def test_gcs(db: AsyncSession = Depends(get_db)):
-    """Test GCS connection endpoint"""
-    try:
-        from services.gcs_monitor import GCSMonitor
-        monitor = GCSMonitor(db)
-
-        # Test basic bucket access
-        xml_files = monitor.get_xml_files()
-
-        return {
-            'status': 'success',
-            'bucket': monitor.bucket_name,
-            'xml_files_found': len(xml_files),
-            # Show first 10 files
-            'file_names': [blob.name for blob in xml_files[:10]]
-        }
-
-    except Exception as e:
-        return {'status': 'error', 'error': str(e),
-                'bucket': os.environ.get('GOOGLE_BUCKET', 'Not set')}, 500
-
-
-@app.route('/list-all-bucket-files')
+@app.get('/list-all-bucket-files')
 def list_all_bucket_files(db: AsyncSession = Depends(get_db)):
     """List all files in the GCS bucket including processed folder"""
     try:
-        from services.gcs_monitor import GCSMonitor
+        from app.services.gcs_monitor import GCSFileProcessor
 
-        monitor = GCSMonitor(db)
+        monitor = GCSFileProcessor(db)
 
         # Get all files in bucket (not just XML)
         all_blobs = list(monitor.bucket.list_blobs())
@@ -256,14 +256,14 @@ def list_all_bucket_files(db: AsyncSession = Depends(get_db)):
         return {'status': 'error', 'error': str(e)}, 500
 
 
-@app.route('/trigger-monitoring')
+@app.get('/trigger-monitoring')
 def trigger_monitoring(db: AsyncSession = Depends(get_db)):
     """Manually trigger GCS monitoring cycle for testing"""
     try:
-        from services.gcs_monitor import GCSMonitor
+        from app.services.gcs_monitor import GCSFileProcessor
 
-        monitor = GCSMonitor(db)
-        monitor.process_new_files()
+        monitor = GCSFileProcessor(db)
+        monitor.process_all_files()
 
         return {
             'status': 'success',
@@ -285,16 +285,19 @@ def clear_cached_secrets():
     return {"status": "ok", "message": "GSM cache cleared."}
 
 
-@app.get("/local")
+@app.get("/local-test")
 async def local_test(db: AsyncSession = Depends(get_db)):
     """
     Process the file smoke.xml locally"""
-    with open("test_dmarc_sample.xml", "rb") as f:
+    with open("app/test_dmarc_sample.xml", "rb") as f:
         content_bytes = f.read()
+
+    # Process the notification
     result = await process_notification(
             content=content_bytes,
             context={
-                "email_sender": None
+                "filepath": "app/test_dmarc_sample.xml",
+                "component": COMPONENT_NAME
             },
             db=db
         )
@@ -302,22 +305,20 @@ async def local_test(db: AsyncSession = Depends(get_db)):
     return {"status": "ok", "component": COMPONENT_NAME, "result": result}
 
 
-@app.route('/test-db')
-def test_db(db: AsyncSession = Depends(get_db)):
-    from sqlalchemy.orm import sessionmaker
+@app.get("/test-db")
+async def test_db(db: AsyncSession = Depends(get_db)):
+    """Test database connectivity."""
     from sqlalchemy import text
 
     try:
-
-        Session = sessionmaker(bind=db.engine)
-        session = Session()
-        session.execute(text('SELECT 1'))
+        await db.execute(text("SELECT 1"))
         return {"status": "success"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}, 500
+        # optional: logger.exception("db_test_failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/")  # Pub/Sub push target
+@app.post("/trigger")  # Pub/Sub push target
 async def pubsub_push(request: Request,
                       db: AsyncSession = Depends(get_db)):
     """ Handles Pub/Sub push messages for GCS object finalize events.
@@ -376,7 +377,8 @@ async def pubsub_push(request: Request,
                 "object": object_id,
                 "generation": generation,
                 "component": COMPONENT_NAME,
-                "raw_event": raw
+                "raw_event": raw,
+                "filename": object_id
             },
             db=db
         )
@@ -408,7 +410,7 @@ async def pubsub_push(request: Request,
 
 
 # --------------------------------------
-# Some DB related utilities
+# DB related utilities
 # --------------------------------------
 async def create_tables(local_engine: AsyncEngine = engine) -> None:
     """Create all tables using the async engine."""
@@ -431,6 +433,7 @@ def main():
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         exit(1)
+
     import asyncio
 
     asyncio.run(create_tables(engine))

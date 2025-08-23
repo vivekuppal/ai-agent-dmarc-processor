@@ -1,242 +1,297 @@
 import os
 import logging
-from typing import List, Optional
+from abc import ABC, abstractmethod
+from typing import List, Callable, Dict, Optional, Tuple, Any
+from urllib.parse import urlparse
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
-from models import ProcessedFile
-from services.validators import ValidationFramework
-from services.dmarc_parser import DMARCParser
-from utils import calculate_file_hash
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import select, insert, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models import ProcessedFile
+from app.services.validators import ValidationFramework
+from app.services.dmarc_parser import DMARCParser
+from app.utils import calculate_file_hash
+from app.db import maybe_transaction
+
 
 logger = logging.getLogger(__name__)
 
 
-class GCSMonitor:
-    """Monitor Google Cloud Storage bucket for new DMARC report files"""
+class FileProcessor(ABC):
+    """Base class for file processors with pluggable factory & async I/O."""
+    _registry: Dict[str, Callable[..., "FileProcessor"]] = {}
 
-    def __init__(self, db):
+    """Abstract base class for file processors"""
+    def __init__(self, db: AsyncSession, file_path: str = None):
+        print("FileProcessor init")
         self.db = db
-        self.bucket_name = os.environ.get("GOOGLE_BUCKET")
-        self.client = None
-        self.bucket = None
+        self.file_path = file_path
         self.validator = ValidationFramework()
         self.parser = DMARCParser(db)
 
-        if not self.bucket_name:
-            raise ValueError("GOOGLE_BUCKET environment variable is required")
+    # ----- Factory registration -----
+    @classmethod
+    def register_scheme(cls, scheme: str, constructor: Callable[..., "FileProcessor"]) -> None:
+        cls._registry[scheme.lower()] = constructor
 
-        try:
-            self.client = storage.Client()
-            self._initialize_bucket()
-        except Exception as e:
-            logger.error(f"Failed to initialize Google Cloud Storage client: {str(e)}")
-            logger.info("Make sure Google Cloud credentials are properly configured")
-            raise
+    @staticmethod
+    def _parse_uri(resource: str) -> Tuple[Optional[str], str, Optional[str]]:
+        """
+        Returns (scheme, path, netloc/bucket).
+        For plain paths (no scheme), scheme=None and path=resource.
+        """
+        parsed = urlparse(resource)
+        if parsed.scheme:
+            path = parsed.path[1:] if parsed.path.startswith("/") else parsed.path
+            return parsed.scheme.lower(), path, parsed.netloc
+        return None, resource, None
 
-    def _initialize_bucket(self):
-        """Initialize GCS bucket connection"""
-        try:
-            # Create bucket reference without validating bucket metadata
-            self.bucket = self.client.bucket(self.bucket_name)
-            logger.info(f"GCS bucket client initialized for: {self.bucket_name}")
-        except Exception as e:
-            logger.error(f"Failed to initialize GCS bucket client: {str(e)}")
-            raise
+    @classmethod
+    def create(cls, resource: str, *, db: AsyncSession,
+               **kwargs: Any) -> "FileProcessor":
+        """
+        Choose implementation by URI scheme.
+        - Plain path or file:// → LocalFileProcessor
+        - gs:// or gcs://      → GCSFileProcessor
+        Extra kwargs are forwarded to the constructor (e.g., client=...).
+        """
+        scheme, path, netloc = cls._parse_uri(resource)
 
-    def get_xml_files(self) -> List[storage.Blob]:
-        """Get all XML files from the GCS bucket (excluding processed folder)"""
-        try:
-            blobs = list(self.bucket.list_blobs())
-            # Filter for XML files that are NOT in the processed folder
-            xml_files = [
-                blob for blob in blobs
-                if blob.name.lower().endswith('.xml') and '/' not in blob.name and not blob.name.startswith('processed/')
-            ]
-            logger.info(f"Found {len(xml_files)} XML files in bucket (excluding processed folder)")
-            return xml_files
-        except GoogleCloudError as e:
-            logger.error(f"Error listing files in bucket: {str(e)}")
-            return []
+        # Local
+        if scheme is None or scheme == "file":
+            ctor = cls._registry.get("file")
+            if not ctor:
+                raise ValueError("No handler registered for 'file' scheme.")
+            # For file:// we already stripped leading slash in path above
+            file_path = resource if scheme is None else f"/{path}"
+            return ctor(db=db, file_path=file_path, **kwargs)
 
-    def check_file_processing_status(self, file_hash: str, file_path: str) -> tuple[str, int]:
+        # GCS
+        if scheme in ("gs", "gcs"):
+            ctor = cls._registry.get("gs")
+            if not ctor:
+                raise ValueError("No handler registered for 'gs' scheme.")
+            if not netloc:
+                raise ValueError("GCS URI must be gs://<bucket>/<object>")
+            return ctor(db=db, file_path=path, bucket=netloc, **kwargs)
+
+        # Custom schemes (if registered)
+        ctor = cls._registry.get(scheme)
+        if ctor:
+            return ctor(db=db, file_path=path, netloc=netloc, **kwargs)
+
+        raise ValueError(f"Unsupported scheme '{scheme}' in resource: {resource}")
+
+    async def check_file_processing_status(self, file_hash: str,
+                                           file_path: str) -> tuple[str, int]:
         """
         Check file processing status and handle concurrent access
 
-        Returns:
-            tuple: (action, existing_file_id)
-            action can be: 'skip', 'duplicate', 'process', 'processing'
+        Returns: ('skip' | 'duplicate' | 'process' | 'processing', existing_file_id)
         """
         try:
-            logger.info("check_file_processing_status")
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
-
-            # Check if file hash exists
-            existing_file = session.query(ProcessedFile).filter_by(file_hash=file_hash).first()
+            result = await self.db.execute(
+                select(ProcessedFile).where(
+                    ProcessedFile.file_hash == file_hash)
+            )
+            existing_file = result.scalar_one_or_none()
 
             if existing_file:
-                # File hash exists - check filename and status
-                if existing_file.report_file == file_path and existing_file.status == 'done':
-                    # Same file name, skip
-                    session.close()
-                    return 'skip', existing_file.id
-                elif existing_file.status == 'processing':
-                    session.close()
-                    return 'processing', existing_file.id
-                elif existing_file.report_file != file_path:
-                    # Same hash, different filename - mark as duplicate
-                    session.close()
-                    return 'duplicate', existing_file.id
-                else:
-                    # File exists but not done (error state)
-                    session.close()
-                    return 'skip', existing_file.id
-            session.close()
-            return 'process', 0
+                if existing_file.report_file == file_path and existing_file.status == "done":
+                    return "skip", existing_file.id
+                if existing_file.status == "processing":
+                    return "processing", existing_file.id
+                if existing_file.report_file != file_path:
+                    return "duplicate", existing_file.id
+                # exists but not 'done' (treat as skip/error state)
+                return "skip", existing_file.id
+
+            # not found → needs processing
+            return "process", 0
 
         except Exception as e:
             logger.error(f"Error checking file processing status: {str(e)}")
-            return 'skip', 0
+            return "skip", 0
+        finally:
+             # IMPORTANT: close the implicit read tx so later code can start a new one
+            if self.db.in_transaction():
+                await self.db.rollback()
 
-    def start_file_processing(self, file_hash: str, report_file: str) -> int:
-        """Mark file as being processed to prevent concurrent processing"""
+    async def start_file_processing(self, file_hash: str,
+                                    report_file: str) -> int:
+        """
+        Try to claim a file by inserting a 'processing' row.
+        Returns the new row's id if inserted;
+        returns 0 if a row already exists.
+        """
         try:
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
 
-            processed_file = ProcessedFile(
-                file_hash=file_hash,
-                report_file=report_file,
-                status='processing',
-                dmarc_report_id=None  # Will be set when processing completes
+            stmt = (
+                insert(ProcessedFile)
+                .values(
+                    file_hash=file_hash,
+                    report_file=report_file,
+                    status="processing",
+                    dmarc_report_id=None,
+                )
+                # If we inserted, return id; if conflict, this returns no rows
+                .returning(ProcessedFile.id)
             )
 
-            session.add(processed_file)
-            session.commit()
-            file_id = processed_file.id
-            session.close()
+            async with maybe_transaction(self.db):
+                res = await self.db.execute(stmt)
+                new_id = res.scalar_one_or_none()
 
-            logger.info(f"Started processing file: {report_file} (processing_id={file_id})")
-            return file_id
+            if new_id is None:
+                # Row already exists → per your requirement, return 0
+                return 0
 
-        except Exception as e:
-            logger.error(f"Error starting file processing: {str(e)}")
+            # commit succeeded and we have a new id
+            logger.info(f"Started processing file: {report_file} (processing_id={new_id})")
+            return new_id
+
+        except Exception as ex:
+            logger.exception(f"Error starting file processing: {str(ex)}")
+            if self.db.in_transaction():
+                await self.db.rollback()
             return 0
 
-    def complete_file_processing(self, processing_id: int, dmarc_report_id: int):
-        """Mark file processing as complete"""
+    async def complete_file_processing(self, processing_id: int,
+                                       dmarc_report_id: int) -> bool:
+        """Mark file processing as complete (only if currently 'processing').
+        """
         try:
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
-
-            processed_file = session.query(ProcessedFile).filter_by(id=processing_id).first()
-            if processed_file:
-                processed_file.status = 'done'
-                processed_file.dmarc_report_id = dmarc_report_id
-                session.commit()
-                logger.info(f"Completed processing file: {processed_file.report_file} (dmarc_report_id={dmarc_report_id})")
-
-            session.close()
-
-        except Exception as e:
-            logger.error(f"Error completing file processing: {str(e)}")
-
-    def mark_file_as_error(self, processing_id: int, error_message: str = None):
-        """Mark file processing as failed"""
-        try:
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
-
-            processed_file = session.query(ProcessedFile).filter_by(id=processing_id).first()
-            if processed_file:
-                processed_file.status = 'error'
-                session.commit()
-                logger.error(f"Marked file as error: {processed_file.report_file}")
-
-            session.close()
-
-        except Exception as e:
-            logger.error(f"Error marking file as error: {str(e)}")
-
-    def delete_gcs_file(self, blob: storage.Blob):
-        # Delete original file
-        blob.delete()
-        logger.info(f"Deleted file: {blob.name}.")
-
-    def mark_file_as_duplicate(self, file_hash: str, report_file: str,
-                               original_file_id: int):
-        """Mark file as duplicate of existing file"""
-        try:
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
-
-            duplicate_file = ProcessedFile(
-                file_hash=file_hash,
-                report_file=report_file,
-                status='duplicate',
-                duplicate_id=original_file_id,
-                dmarc_report_id=None
+            # transaction; commits/rolls back automatically
+            stmt = (
+                update(ProcessedFile)
+                # only transition from processing→done
+                .where(
+                    ProcessedFile.id == processing_id,
+                    ProcessedFile.status == "processing",
+                )
+                .values(
+                    status="done",
+                    dmarc_report_id=dmarc_report_id,
+                )
+                # get a bit of context for logging
+                .returning(ProcessedFile.report_file)
             )
+            async with maybe_transaction(self.db):
+                res = await self.db.execute(stmt)
+                row = res.first()  # None if no row matched/updated
 
-            session.add(duplicate_file)
-            session.commit()
-            session.close()
+            if row:
+                report_file = row[0]
+                logger.info(
+                    f"Completed processing file: {report_file} (processing_id={processing_id}, dmarc_report_id={dmarc_report_id})"
+                )
+                return True
+            else:
+                # Either the row doesn't exist, or it wasn't in
+                # 'processing' state.
+                logger.warning(
+                    f"No update performed for processing_id={processing_id} "
+                    f"(not found or not in 'processing' state)."
+                )
+                return False
 
-            logger.info(f"Marked file as duplicate: {report_file} (original_id={original_file_id})")
+        except Exception:
+            if self.db.in_transaction():
+                await self.db.rollback()
+            logger.exception("Error completing file processing")
 
-        except Exception as e:
-            logger.error(f"Error marking file as duplicate: {str(e)}")
-
-    def move_file_to_processed(self, blob: storage.Blob) -> bool:
-        """Move successfully processed file to processed folder"""
+    async def mark_file_as_error(self, processing_id: int) -> bool:
+        """Mark file processing as failed."""
         try:
-            # Create processed folder path
-            processed_path = f"processed/{blob.name}"
-
-            # Copy file to processed folder
-            processed_blob = self.bucket.blob(processed_path)
-            processed_blob.rewrite(blob)
-
-            # Delete original file
-            blob.delete()
-
-            logger.info(f"Moved file to processed folder: {blob.name} -> {processed_path}")
-            return True
-
-        except Exception as e:
-            logger.error(f"Failed to move file to processed folder: {blob.name} - {str(e)}")
-            return False
-
-    def mark_file_as_processed(self, file_hash: str, dmarc_report_id: int, report_file: str, duplicate_id: int = None):
-        """Mark a file as processed to avoid duplicate processing"""
-        try:
-            Session = sessionmaker(bind=self.db.engine)
-            session = Session()
-
-            processed_file = ProcessedFile(
-                dmarc_report_id=dmarc_report_id,
-                file_hash=file_hash,
-                report_file=report_file,
-                duplicate_id=duplicate_id
+            stmt = (
+                update(ProcessedFile)
+                .where(ProcessedFile.id == processing_id,
+                       ProcessedFile.status == "processing")
+                .values(status="error")
+                .returning(ProcessedFile.report_file)
             )
-            session.add(processed_file)
-            session.commit()
-            session.close()
-            logger.info(f"Marked file as processed: {report_file} (hash={file_hash[:8]}... dmarc_report_id={dmarc_report_id})")
-        except Exception as e:
-            logger.error(f"Error marking file as processed: {str(e)}")
-            raise
+            async with maybe_transaction(self.db):
+                res = await self.db.execute(stmt)
+                row = res.first()  # None if no row matched
 
-    def download_file_content(self, blob: storage.Blob) -> Optional[bytes]:
-        """Download file content from GCS"""
+            if row:
+                report_file = row[0]
+                logger.error(f"Marked file as error: {report_file} (processing_id={processing_id})")
+                return True
+            else:
+                logger.warning(f"No row found to mark as error (processing_id={processing_id}).")
+                return False
+
+        except Exception:
+            logger.exception("Error marking file as error")
+            if self.db.in_transaction():
+                await self.db.rollback()
+
+    async def mark_file_as_duplicate(self, file_hash: str,
+                                     report_file: str,
+                                     original_file_id: int) -> int:
+        """
+        Insert a 'duplicate' row pointing to the original file.
+        Returns the new row id, or 0 on error.
+        """
         try:
-            content = blob.download_as_bytes()
-            logger.info(f"Downloaded file: {blob.name} ({len(content)} bytes)")
-            return content
-        except GoogleCloudError as e:
-            logger.error(f"Error downloading file {blob.name}: {str(e)}")
-            return None
+            async with maybe_transaction(self.db):
+                dup = ProcessedFile(
+                    file_hash=file_hash,
+                    report_file=report_file,
+                    status="duplicate",
+                    duplicate_id=original_file_id,
+                    dmarc_report_id=None,
+                )
+                self.db.add(dup)
+                await self.db.flush()      # get dup.id from DB
+                new_id = dup.id
+
+            # committed successfully
+            logger.info(f"Marked file as duplicate: {report_file} "
+                        f"(original_id={original_file_id}, new_id={new_id})")
+            return new_id
+
+        except Exception:
+            logger.exception("Error marking file as duplicate")
+            if self.db.in_transaction():
+                await self.db.rollback()
+            return 0
+
+    async def mark_file_as_processed(
+        self,
+        file_hash: str,
+        dmarc_report_id: int,
+        report_file: str,
+        duplicate_id: int | None = None,
+    ) -> int:
+        """Mark a file as processed ('done') and record linkage
+        to the DMARC report.
+        """
+        try:
+            async with maybe_transaction(self.db):
+                pf = ProcessedFile(
+                    file_hash=file_hash,
+                    report_file=report_file,
+                    status="done",
+                    dmarc_report_id=dmarc_report_id,
+                    duplicate_id=duplicate_id,
+                )
+                self.db.add(pf)
+                await self.db.flush()     # populate pf.id from DB
+                new_id = pf.id
+
+            logger.info(
+                f"Marked file as processed: {report_file} "
+                f"(hash={file_hash[:8]}..., dmarc_report_id={dmarc_report_id}, id={new_id})"
+            )
+            return new_id
+
+        except Exception:
+            logger.exception("Error marking file as processed")
+            if self.db.in_transaction():
+                await self.db.rollback()
+            return 0
 
     def determine_report_source(self, file_name: str, content: bytes) -> str:
         """Determine the report source based on file name or content"""
@@ -267,23 +322,172 @@ class GCSMonitor:
         # Default to 'Unknown' if we can't determine
         return 'Unknown'
 
-    def process_file(self, blob: storage.Blob) -> bool:
-        """Process a single DMARC report file with concurrent processing protection"""
-        file_path = f"gs://{self.bucket_name}/{blob.name}"
-        logger.info(f"Processing file: {file_path}")
+    @abstractmethod
+    async def process_file(self, content: bytes, file_path: str) -> bool:
+        pass
 
+
+class LocalFileProcessor(FileProcessor):
+    async def process_file(self, content: bytes, file_path: str) -> bool:
+        """Process a single DMARC report file with concurrent
+        processing protection
+        """
+        logger.info(f"Processing file: {file_path}")
         processing_id = 0
         try:
-            # Download file content
-            content = self.download_file_content(blob)
-            if content is None:
-                return False
-
             # Calculate file hash
             file_hash = calculate_file_hash(content)
 
             # Check processing status for concurrent access control
-            action, existing_file_id = self.check_file_processing_status(file_hash, file_path)
+            action, existing_file_id = await self.check_file_processing_status(
+                file_hash, file_path)
+
+            if action == 'skip':
+                return True
+            elif action == 'processing':
+                logger.info(f"File currently being processed by another instance, skipping: {file_path}")
+                return True
+            elif action == 'duplicate':
+                # Mark as duplicate, move to processed
+                await self.mark_file_as_duplicate(file_hash, file_path,
+                                            existing_file_id)
+                logger.info(f"File marked as duplicate: {file_path} (original_id: {existing_file_id})")
+                return True
+            elif action == 'process':
+                # Start processing - this creates the lock
+                processing_id = await self.start_file_processing(file_hash,
+                                                                 file_path)
+                if processing_id == 0:
+                    logger.error(f"Failed to start processing lock for: {file_path}")
+                    return False
+            else:
+                logger.error(f"Unknown action from file status check: {action}")
+                return False
+
+            # Determine report source
+            report_source = self.determine_report_source(file_name=file_path,
+                                                         content=content)
+
+            # Validate file
+            validation_result = self.validator.validate_file(content,
+                                                             file_path)
+            if not validation_result.is_valid:
+                logger.error(f"File validation failed for {file_path}: {validation_result.errors}")
+                await self.mark_file_as_error(processing_id)
+                return False
+
+            # Parse DMARC report (creates entries in dmarc_reports and dmarc_report_details tables)
+            dmarc_report_id = await self.parser.parse_and_store(content,
+                                                                file_path,
+                                                                report_source)
+            if not dmarc_report_id:
+                logger.error(f"Failed to parse DMARC report: {file_path}")
+                await self.mark_file_as_error(processing_id)
+                return False
+
+            # Mark processing as complete
+            await self.complete_file_processing(processing_id, dmarc_report_id)
+
+            return True
+
+        except Exception as e:
+            logger.error(f"LocalFileProcessor: Error processing file {file_path}: {str(e)}")
+            # Mark as error if we have a processing lock
+            if processing_id > 0:
+                self.mark_file_as_error(processing_id)
+            return False
+
+
+class GCSFileProcessor(FileProcessor):
+
+    def __init__(self, db, file_path: str = None):
+        super().__init__(db, file_path)
+        self.bucket_name = os.environ.get("GOOGLE_BUCKET")
+        self.client = None
+        self.bucket = None
+
+        if not self.bucket_name:
+            raise ValueError("GOOGLE_BUCKET environment variable is required")
+
+        try:
+            self.client = storage.Client()
+            self._initialize_bucket()
+        except Exception as e:
+            logger.error(f"Failed to initialize Google Cloud Storage client: {str(e)}")
+            logger.info("Make sure Google Cloud credentials are properly configured")
+            raise
+
+    def _initialize_bucket(self):
+        """Initialize GCS bucket connection"""
+        try:
+            # Create bucket reference without validating bucket metadata
+            self.bucket = self.client.bucket(self.bucket_name)
+            logger.info(f"GCS bucket client initialized for: {self.bucket_name}")
+        except Exception as e:
+            logger.error(f"Failed to initialize GCS bucket client: {str(e)}")
+            raise
+
+    def get_xml_files(self) -> List[storage.Blob]:
+        """Get all XML files from the GCS bucket (excluding processed folder)
+        """
+        try:
+            blobs = list(self.bucket.list_blobs())
+            # Filter for XML files that are NOT in the processed folder
+            xml_files = [
+                blob for blob in blobs
+                if blob.name.lower().endswith('.xml') and '/' not in blob.name and not blob.name.startswith('processed/')
+            ]
+            logger.info(f"Found {len(xml_files)} XML files in bucket (excluding processed folder)")
+            return xml_files
+        except GoogleCloudError as e:
+            logger.error(f"Error listing files in bucket: {str(e)}")
+            return []
+
+    def move_file_to_processed(self, blob: storage.Blob) -> bool:
+        """Move successfully processed file to processed folder"""
+        try:
+            # Create processed folder path
+            processed_path = f"processed/{blob.name}"
+
+            # Copy file to processed folder
+            processed_blob = self.bucket.blob(processed_path)
+            processed_blob.rewrite(blob)
+
+            # Delete original file
+            blob.delete()
+
+            logger.info(f"Moved file to processed folder: {blob.name} -> {processed_path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to move file to processed folder: {blob.name} - {str(e)}")
+            return False
+
+    def delete_gcs_file(self, blob: storage.Blob):
+        """Delete a file from GCS"""
+        blob.delete()
+        logger.info(f"Deleted file: {blob.name}.")
+
+    def download_file_content(self, blob: storage.Blob) -> Optional[bytes]:
+        """Download file content from GCS"""
+        try:
+            content = blob.download_as_bytes()
+            logger.info(f"Downloaded file: {blob.name} ({len(content)} bytes)")
+            return content
+        except GoogleCloudError as e:
+            logger.error(f"Error downloading file {blob.name}: {str(e)}")
+            return None
+
+    def process_file(self, content: bytes, file_path: str) -> bool:
+        logger.info(f"Processing file: {file_path}")
+        processing_id = 0
+        try:
+            # Calculate file hash
+            file_hash = calculate_file_hash(content)
+
+            # Check processing status for concurrent access control
+            action, existing_file_id = self.check_file_processing_status(
+                file_hash, file_path)
 
             if action == 'skip':
                 logger.info(f"File already processed, skipping and delete: {file_path} (hash: {file_hash[:8]}...)")
@@ -337,14 +541,27 @@ class GCSMonitor:
             return True
 
         except Exception as e:
-            logger.error(f"Error processing file {file_path}: {str(e)}")
+            logger.error(f"Error 2 processing file {file_path}: {str(e)}")
             # Mark as error if we have a processing lock
             if processing_id > 0:
-                self.mark_file_as_error(processing_id, str(e))
+                self.mark_file_as_error(processing_id)
             return False
 
-    def process_new_files(self):
-        """Process all new DMARC report files in the bucket"""
+    def process_gcs_file(self, blob: storage.Blob) -> bool:
+        """Process a single DMARC report file"""
+        file_path = f"gs://{self.bucket_name}/{blob.name}"
+        logger.info(f"Processing file: {file_path}")
+        try:
+            content = self.download_file_content(blob)
+            if content is None:
+                return False
+            return self.process_file(content, file_path=file_path)
+        except Exception as e:
+            logger.error(f"Error processing gcs file {file_path}: {str(e)}")
+            return False
+
+    def process_all_files(self):
+        """Process all DMARC report files in the bucket"""
         logger.info("Starting GCS bucket monitoring cycle")
 
         try:
@@ -359,7 +576,7 @@ class GCSMonitor:
 
             for blob in xml_files:
                 try:
-                    if self.process_file(blob):
+                    if self.process_gcs_file(blob):
                         processed_count += 1
                     else:
                         failed_count += 1
@@ -371,3 +588,18 @@ class GCSMonitor:
 
         except Exception as e:
             logger.error(f"Error in GCS monitoring cycle: {str(e)}")
+
+
+# Register GCS handler for gs:// and gcs://
+def _gcs_ctor(**kw):
+    return GCSFileProcessor(**kw)
+
+
+def _local_ctor(**kw):
+    return LocalFileProcessor(**kw)
+
+
+FileProcessor.register_scheme("gs", _gcs_ctor)
+FileProcessor.register_scheme("gcs", _gcs_ctor)
+FileProcessor.register_scheme("file", _local_ctor)
+FileProcessor.register_scheme("", _local_ctor)  # default to local

@@ -3,6 +3,7 @@ import json
 import os
 from functools import lru_cache
 from typing import Optional, Callable, Any
+import hashlib
 
 from fastapi import Request
 from google.auth.transport import requests as google_requests
@@ -168,6 +169,11 @@ def get_database_url() -> str:
         return get_secret(project_id=project_id, secret_name="DATABASE_URL")
 
     return os.environ.get("DATABASE_URL")
+
+
+def calculate_file_hash(content: bytes) -> str:
+    """Calculate SHA256 hash of file content"""
+    return hashlib.sha256(content).hexdigest()
 
 
 # -----------------------

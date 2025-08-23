@@ -1,14 +1,21 @@
 import logging
+from datetime import datetime
 import socket
 from typing import Optional
+from sqlalchemy import select
 import xml.etree.ElementTree as ET
-from models import (
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.models import (
     DMARCReport,
     EmailStatus,
     EmailStatusReason,
     Domain,
     DmarcReportAuthDetail,
+    DMARCReportDetail,
+    AuthType,
+    AuthResult
 )
+from app.db import maybe_transaction
 
 
 logger = logging.getLogger(__name__)
@@ -17,27 +24,23 @@ logger = logging.getLogger(__name__)
 class DMARCParser:
     """Parse DMARC XML reports and store data in database"""
 
-    def __init__(self, db):
+    def __init__(self, db: AsyncSession):
         self.db = db
 
-    def lookup_customer_id(self, policy_domain: str) -> Optional[int]:
+    async def lookup_customer_id(self, policy_domain: str) -> Optional[int]:
         """
-        Lookup customer_id for a given policy domain
-
-        Args:
-            policy_domain: The domain from the DMARC policy
-
-        Returns:
-            Optional[int]: customer_id if found, None otherwise
+        Lookup customer_id for a given policy domain using AsyncSession.
         """
         try:
-            domain_record = self.db.session.query(Domain).filter(
-                Domain.domain == policy_domain
-            ).first()
+            # Efficient: select only the needed column
+            result = await self.db.execute(
+                select(Domain.customer_id).where(Domain.domain == policy_domain)
+            )
+            customer_id = result.scalar_one_or_none()
 
-            if domain_record:
-                logger.info(f"Found customer_id {domain_record.customer_id} for domain {policy_domain}")
-                return domain_record.customer_id
+            if customer_id is not None:
+                logger.info(f"Found customer_id {customer_id} for domain {policy_domain}")
+                return customer_id
             else:
                 logger.info(f"No customer mapping found for domain {policy_domain}")
                 return None
@@ -46,27 +49,30 @@ class DMARCParser:
             logger.error(f"Error looking up customer for domain {policy_domain}: {str(e)}")
             return None
 
-    def parse_and_store(self, xml_content: bytes, file_path: str, report_source: str) -> int:
-        """
-        Parse DMARC XML content and store in database
+        finally:
+            # End the implicit read-only transaction started by the SELECT
+            if self.db.in_transaction():
+                await self.db.rollback()
 
-        Returns:
-            int: dmarc_report_id if successful, 0 if failed
+    async def parse_and_store(self, xml_content: bytes, file_path: str, report_source: str) -> int:
+        """
+        Parse DMARC XML content and store in database.
+        Returns dmarc_report_id if successful, 0 if failed.
         """
         try:
             logger.info(f"Parsing DMARC report from {report_source}: {file_path}")
 
-            # Parse XML structure
+            # 1) Parse XML
             parsed_data = self._parse_xml_structure(xml_content)
             if not parsed_data:
                 logger.error(f"Failed to parse XML structure from {file_path}")
-                return False
+                return 0  # ensure int return
 
-            # Lookup customer_id for the policy domain
+            # 2) Lookup customer for policy domain
             policy_domain = parsed_data['policy_published']['domain']
-            customer_id = self.lookup_customer_id(policy_domain)
+            customer_id: Optional[int] = await self.lookup_customer_id(policy_domain)
 
-            # Create the main DMARC report record
+            # 3) Build main report row
             dmarc_report = DMARCReport(
                 report_source=parsed_data['report_metadata']['org_name'],
                 report_start_date=parsed_data['report_metadata']['date_start'],
@@ -80,78 +86,81 @@ class DMARCParser:
                 sp=parsed_data['policy_published'].get('sp'),
                 pct=parsed_data['policy_published'].get('pct'),
                 np=parsed_data['policy_published'].get('np'),
-                report_file=file_path
+                report_file=file_path,
             )
 
-            self.db.session.add(dmarc_report)
-            self.db.session.flush()  # Get the ID for the foreign key
-
-            # Create detail records for each email record in the report
             details_stored = 0
-            for record_data in parsed_data.get('records', []):
-                try:
-                    # Determine email status using the new logic
-                    email_status, email_status_reason = self._determine_email_status(record_data)
-                    hostname = self.get_hostname(record_data.get('source_ip', ''))
 
-                    # Create DMARC report detail record
-                    from models import DMARCReportDetail
-                    detail_record = DMARCReportDetail(
-                        dmarc_report_id=dmarc_report.id,
-                        email_status=email_status,
-                        email_status_reason=email_status_reason,
-                        email_count=record_data.get('count', 1),
-                        source_ip=record_data.get('source_ip'),
-                        # Will be populated later with reverse DNS lookup
-                        hostname=hostname,
-                        from_domain=record_data.get('header_from'),
-                        to_domain=record_data.get('envelope_to')
-                    )
+            # 4) Transaction: insert main report + details + auth rows atomically
+            async with maybe_transaction(self.db) as s:
+                s.add(dmarc_report)
+                await s.flush()  # populate dmarc_report.id
 
-                    self.db.session.add(detail_record)
-                    details_stored += 1
+                # Details & auth
+                for record_data in parsed_data.get('records', []):
+                    try:
+                        email_status, email_status_reason = self._determine_email_status(record_data)
+                        hostname = self.get_hostname(record_data.get('source_ip', ''))
 
-                    # Add SPF record to DmarcReportAuthDetail
-                    spf_result = (record_data.get('spf_auth_result') or '').lower()
-                    spf_domain = record_data.get('spf_auth_domain')
-
-                    if spf_domain:
-                        spf_auth = DmarcReportAuthDetail(
+                        detail = DMARCReportDetail(
                             dmarc_report_id=dmarc_report.id,
-                            type='spf',
-                            domain=spf_domain,
-                            result='pass' if spf_result == 'pass' else 'fail'
+                            email_status=email_status,
+                            email_status_reason=email_status_reason,
+                            email_count=record_data.get('count', 1),
+                            source_ip=record_data.get('source_ip'),
+                            hostname=hostname,  # may be refined via rDNS later
+                            from_domain=record_data.get('header_from'),
+                            to_domain=record_data.get('envelope_to'),
                         )
-                        self.db.session.add(spf_auth)
+                        s.add(detail)
+                        details_stored += 1
 
-                    # Add DKIM record to DmarcReportAuthDetail
-                    dkim_result = (record_data.get('dkim_auth_result') or '').lower()
-                    dkim_domain = record_data.get('dkim_auth_domain')
-                    dkim_selector = record_data.get('dkim_auth_selector')
+                        # SPF auth
+                        spf_result = (record_data.get('spf_auth_result') or '').lower()
+                        spf_domain = record_data.get('spf_auth_domain')
+                        if spf_domain:
+                            print('parse_and_store - spf 1')
+                            s.add(DmarcReportAuthDetail(
+                                dmarc_report_id=dmarc_report.id,
+                                type=AuthType.SPF,
+                                domain=spf_domain,
+                                result=AuthResult.PASS if spf_result == 'pass' else AuthResult.FAIL,
+                            ))
+                            print('parse_and_store - spf 2')
+                            await s.flush()  # populate dmarc_report.id
+                            print('parse_and_store - spf 3')
 
-                    if dkim_domain:
-                        dkim_auth = DmarcReportAuthDetail(
-                            dmarc_report_id=dmarc_report.id,
-                            type='dkim',
-                            domain=dkim_domain,
-                            selector=dkim_selector,
-                            result='pass' if dkim_result == 'pass' else 'fail'
-                        )
-                        self.db.session.add(dkim_auth)
+                        # DKIM auth
+                        dkim_result = (record_data.get('dkim_auth_result') or '').lower()
+                        dkim_domain = record_data.get('dkim_auth_domain')
+                        dkim_selector = record_data.get('dkim_auth_selector')
+                        if dkim_domain:
+                            s.add(DmarcReportAuthDetail(
+                                dmarc_report_id=dmarc_report.id,
+                                type=AuthType.DKIM,
+                                domain=dkim_domain,
+                                selector=dkim_selector,
+                                result=AuthResult.PASS if spf_result == 'pass' else AuthResult.FAIL,
+                            ))
+                    except Exception as e:
+                        logger.error(f"Failed to store detail record: {str(e)}")
+                        continue
 
-                except Exception as e:
-                    logger.error(f"Failed to store detail record: {str(e)}")
-                    continue
-
-            # Commit all records
-            self.db.session.commit()
-            logger.info(f"Successfully parsed and stored 1 report with \
-                        {details_stored} detail records from {file_path}")
-            return dmarc_report.id
+            logger.info(
+                f"Successfully parsed and stored 1 report (id={dmarc_report.id}) "
+                f"with {details_stored} detail records from {file_path}"
+            )
+            return dmarc_report.id or 0
 
         except Exception as e:
             logger.error(f"Error parsing DMARC report {file_path}: {str(e)}")
-            self.db.session.rollback()
+            # If we’re in a tx we own, maybe_transaction will roll back automatically.
+            # If we’re inside a caller tx, you can optionally roll back here:
+            if self.db.in_transaction():
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
             return 0
 
     def get_hostname(self, ip_address: bytes) -> str:
@@ -164,6 +173,7 @@ class DMARCParser:
             return hostname
         except socket.herror as e:
             logger.error(f"Unable to resolve {ip_address}: {e}")
+            return ''
 
     def _parse_xml_structure(self, xml_content: bytes) -> Optional[dict]:
         """
@@ -177,8 +187,6 @@ class DMARCParser:
         5. Handle different XML schema versions
         """
         try:
-            from datetime import datetime
-
             root = ET.fromstring(xml_content)
             # logger.info('_parse_xml_structure')
             # Extract report metadata

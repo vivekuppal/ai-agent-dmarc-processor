@@ -2,7 +2,9 @@
 from __future__ import annotations
 from typing import Any, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import HTTPException
 from app.models import DMARCReport
+from app.services.gcs_monitor import FileProcessor
 
 
 async def process_notification(*, content: bytes,
@@ -15,11 +17,20 @@ async def process_notification(*, content: bytes,
     Return a JSON-serializable result.
     """
     try:
+        # file_processor = LocalFileProcessor(db)
+        file_path = context.get("filepath", "unknown")
+        file_processor = FileProcessor.create(file_path, db=db)
+        result = await file_processor.process_file(content=content,
+                                                   file_path=file_path)
+        print("process_notification 3")
+        return {
+            'status': result,
+            'message': 'Notification successfully processed'
+        }
 
-        return {"matches_count": 23}
     except Exception as ex:
-        print(f"Error processing file: {ex}")
-        return {"kind": "bytes", "size": len(content)}
+        print(f"Error processing file in process_notification: {ex}")
+        raise HTTPException(status_code=500, detail=str(ex)) from ex
 
 
 async def db_operation(db: AsyncSession) -> Dict[str, Any]:
