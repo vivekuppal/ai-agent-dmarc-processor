@@ -7,7 +7,8 @@ from app.models import DMARCReport
 from app.services.gcs_monitor import FileProcessor
 
 
-async def process_notification(*, content: bytes,
+async def process_notification(*,
+                               content: bytes,
                                context: Dict[str, Any],
                                db: AsyncSession) -> Dict[str, Any]:
     """
@@ -17,12 +18,13 @@ async def process_notification(*, content: bytes,
     Return a JSON-serializable result.
     """
     try:
-        # file_processor = LocalFileProcessor(db)
-        file_path = context.get("filepath", "unknown")
+        # file_path should be complete input filename
+        file_path = context.get("file_path", "")
         file_processor = FileProcessor.create(file_path, db=db)
+
+        # process
         result = await file_processor.process_file(content=content,
                                                    file_path=file_path)
-        print("process_notification 3")
         return {
             'status': result,
             'message': 'Notification successfully processed'

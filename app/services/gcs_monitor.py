@@ -2,7 +2,7 @@ import os
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Callable, Dict, Optional, Tuple, Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
 from sqlalchemy import select, insert, update
@@ -350,7 +350,7 @@ class LocalFileProcessor(FileProcessor):
             elif action == 'duplicate':
                 # Mark as duplicate, move to processed
                 await self.mark_file_as_duplicate(file_hash, file_path,
-                                            existing_file_id)
+                                                  existing_file_id)
                 logger.info(f"File marked as duplicate: {file_path} (original_id: {existing_file_id})")
                 return True
             elif action == 'process':
@@ -400,9 +400,14 @@ class LocalFileProcessor(FileProcessor):
 
 class GCSFileProcessor(FileProcessor):
 
-    def __init__(self, db, file_path: str = None):
+    def __init__(self, db: AsyncSession, file_path: str = None,
+                 lbucket: str = None):
         super().__init__(db, file_path)
-        self.bucket_name = os.environ.get("GOOGLE_BUCKET")
+        if lbucket:
+            self.bucket_name = lbucket
+        else:
+            self.bucket_name = os.environ.get("GOOGLE_BUCKET")
+
         self.client = None
         self.bucket = None
 
@@ -417,6 +422,33 @@ class GCSFileProcessor(FileProcessor):
             logger.info("Make sure Google Cloud credentials are properly configured")
             raise
 
+    def __del__(self):
+        """Best-effort cleanup (not guaranteed to run on interpreter shutdown)."""
+        try:
+            self.close()
+        except Exception:
+            # Avoid raising during GC
+            pass
+
+    def close(self) -> None:
+        """Gracefully release resources.
+        """
+        try:
+            # Buckets are lightweight refs; just drop it.
+            self.bucket = None
+            # The client owns an HTTP session; close it if present.
+            if self.client is not None:
+                http = getattr(self.client, "_http", None)  # requests.Session
+                if http is not None:
+                    try:
+                        http.close()
+                    except Exception:
+                        logger.warning("Failed to close GCS HTTP session cleanly", exc_info=True)
+                # Drop client ref so GC can reclaim
+                self.client = None
+        except Exception:
+            logger.exception("Error during GCSFileProcessor.close()")
+
     def _initialize_bucket(self):
         """Initialize GCS bucket connection"""
         try:
@@ -425,6 +457,34 @@ class GCSFileProcessor(FileProcessor):
             logger.info(f"GCS bucket client initialized for: {self.bucket_name}")
         except Exception as e:
             logger.error(f"Failed to initialize GCS bucket client: {str(e)}")
+            raise
+
+    def switch_bucket(self, new_bucket_name: str) -> None:
+        """
+        Close current bucket context and reinitialize to a different bucket.
+        """
+        if not new_bucket_name:
+            raise ValueError("Bucket name must be a non-empty string")
+
+        # If you want to *reuse* the client (faster), don't call self.close() here.
+        # Just drop the bucket ref and rebind.
+        try:
+            if new_bucket_name == self.bucket_name and self.bucket is not None:
+                logger.info(f"Already bound to bucket: {new_bucket_name}")
+                return
+
+            # Drop current bucket reference
+            self.bucket = None
+            self.bucket_name = new_bucket_name
+
+            # Reuse existing client if available; otherwise create one.
+            if self.client is None:
+                self.client = storage.Client()
+
+            self._initialize_bucket()
+            logger.info(f"Switched GCS bucket to: {self.bucket_name}")
+        except Exception:
+            logger.exception(f"Failed to switch to bucket: {new_bucket_name}")
             raise
 
     def get_xml_files(self) -> List[storage.Blob]:
@@ -478,8 +538,10 @@ class GCSFileProcessor(FileProcessor):
             logger.error(f"Error downloading file {blob.name}: {str(e)}")
             return None
 
-    def process_file(self, content: bytes, file_path: str) -> bool:
+    async def process_file(self, content: bytes, file_path: str) -> bool:
         logger.info(f"Processing file: {file_path}")
+        relative_path = self.object_path_from_gcs_url(file_path)
+        logger.info(f"Processing file relative path: {relative_path}")
         processing_id = 0
         try:
             # Calculate file hash
@@ -488,23 +550,26 @@ class GCSFileProcessor(FileProcessor):
             # Check processing status for concurrent access control
             action, existing_file_id = self.check_file_processing_status(
                 file_hash, file_path)
+            file_blob = self.bucket.blob(relative_path)
 
             if action == 'skip':
                 logger.info(f"File already processed, skipping and delete: {file_path} (hash: {file_hash[:8]}...)")
-                self.delete_gcs_file(blob)
+                self.delete_gcs_file(file_blob)
                 return True
             elif action == 'processing':
                 logger.info(f"File currently being processed by another instance, skipping: {file_path}")
                 return True
             elif action == 'duplicate':
                 # Mark as duplicate, move to processed
-                self.mark_file_as_duplicate(file_hash, file_path, existing_file_id)
-                self.move_file_to_processed(blob)
+                self.mark_file_as_duplicate(file_hash, file_path,
+                                            existing_file_id)
+                self.move_file_to_processed(file_blob)
                 logger.info(f"File marked as duplicate: {file_path} (original_id: {existing_file_id})")
                 return True
             elif action == 'process':
                 # Start processing - this creates the lock
-                processing_id = self.start_file_processing(file_hash, file_path)
+                processing_id = self.start_file_processing(file_hash,
+                                                           file_path)
                 if processing_id == 0:
                     logger.error(f"Failed to start processing lock for: {file_path}")
                     return False
@@ -513,27 +578,31 @@ class GCSFileProcessor(FileProcessor):
                 return False
 
             # Determine report source
-            report_source = self.determine_report_source(blob.name, content)
+            report_source = self.determine_report_source(file_blob.name,
+                                                         content)
 
             # Validate file
-            validation_result = self.validator.validate_file(content, file_path)
+            validation_result = self.validator.validate_file(content,
+                                                             file_path)
             if not validation_result.is_valid:
                 logger.error(f"File validation failed for {file_path}: {validation_result.errors}")
-                self.mark_file_as_error(processing_id, f"Validation failed: {validation_result.errors}")
+                self.mark_file_as_error(processing_id)
                 return False
 
-            # Parse DMARC report (creates entries in dmarc_reports and dmarc_report_details tables)
-            dmarc_report_id = self.parser.parse_and_store(content, file_path, report_source)
+            # Parse DMARC report (creates entries in dmarc_reports and
+            # dmarc_report_details tables)
+            dmarc_report_id = self.parser.parse_and_store(content, file_path,
+                                                          report_source)
             if not dmarc_report_id:
                 logger.error(f"Failed to parse DMARC report: {file_path}")
-                self.mark_file_as_error(processing_id, "DMARC parsing failed")
+                self.mark_file_as_error(processing_id)
                 return False
 
             # Mark processing as complete
             self.complete_file_processing(processing_id, dmarc_report_id)
 
             # Move file to processed folder
-            if self.move_file_to_processed(blob):
+            if self.move_file_to_processed(file_blob):
                 logger.info(f"Successfully processed and moved file: {file_path} (dmarc_report_id: {dmarc_report_id})")
             else:
                 logger.warning(f"File processed but failed to move to processed folder: {file_path}")
@@ -588,6 +657,23 @@ class GCSFileProcessor(FileProcessor):
 
         except Exception as e:
             logger.error(f"Error in GCS monitoring cycle: {str(e)}")
+
+    @staticmethod
+    def object_path_from_gcs_url(gcs_url: str) -> str:
+        """Extract the object path from a GCS URL like:
+        gs://my-bucket/folder/file.xml  -> "folder/file.xml"
+        gcs://my-bucket/file.xml        -> "file.xml"
+        Raises ValueError on bad input.
+        """
+        p = urlparse(gcs_url.strip())
+        if p.scheme.lower() not in ("gs", "gcs"):
+            raise ValueError("URL must start with gs:// or gcs://")
+        if not p.netloc:
+            raise ValueError("Bucket name is missing in URL")
+        obj = unquote(p.path.lstrip("/"))
+        if not obj:
+            raise ValueError("Object path is missing in URL")
+        return obj
 
 
 # Register GCS handler for gs:// and gcs://

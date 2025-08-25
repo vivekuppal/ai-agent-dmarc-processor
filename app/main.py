@@ -174,7 +174,7 @@ def home():
             '/status': 'Application status and statistics',
             '/test-gcs': 'Test Google Cloud Storage connection',
             '/list-all-bucket-files': 'List all files in the GCS bucket',
-            '/trigger-monitoring': 'Manual Trigger for processing files in GCS bucket',
+            '/process-all-files': 'Manual Trigger for processing files in GCS bucket',
             '/clear-gsm-cache': 'Clear cached Google Cloud Secret Manager secrets',
             '/local-test': 'Process a local DMARC XML file for testing',
             '/test-db': 'Test database connectivity',
@@ -208,7 +208,8 @@ async def status(db: AsyncSession = Depends(get_db)):
                 'component_name': COMPONENT_NAME,
                 'expected_event_type': EXPECTED_EVENT_TYPE,
                 'object_prefix': OBJECT_PREFIX,
-                'output_prefix': OUTPUT_PREFIX
+                'output_prefix': OUTPUT_PREFIX,
+                'gcs_bucket': 'from event notification'
             }
         }
 
@@ -256,9 +257,11 @@ def list_all_bucket_files(db: AsyncSession = Depends(get_db)):
         return {'status': 'error', 'error': str(e)}, 500
 
 
-@app.get('/trigger-monitoring')
-def trigger_monitoring(db: AsyncSession = Depends(get_db)):
-    """Manually trigger GCS monitoring cycle for testing"""
+@app.get('/process-all-files')
+def process_all_files(db: AsyncSession = Depends(get_db)):
+    """Manually trigger GCS monitoring cycle for testing
+    This method requires that bucket should be set in the environment.
+    """
     try:
         from app.services.gcs_monitor import GCSFileProcessor
 
@@ -355,6 +358,7 @@ async def pubsub_push(request: Request,
         "object": object_id,
         "generation": generation,
         "idem_key": idem_key,
+        "file_path": f"gs://{bucket}/{object_id}"
     }))
 
     # 1) Read object (by generation when available)
