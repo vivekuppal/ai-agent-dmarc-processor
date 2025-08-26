@@ -2,8 +2,9 @@ fastapi==0.115.5
 uvicorn[standard]==0.30.6
 google-cloud-storage==2.18.2
 google-auth==2.34.0
-defusedxml
+defusedxml==0.7.1
 google-cloud-secret-manager==2.16.0
 SqlAlchemy==2.0.42
-asyncpg 
-pydantic-settings
+asyncpg==0.30.0
+pydantic-settings==2.10.1
+lxml==6.0.1

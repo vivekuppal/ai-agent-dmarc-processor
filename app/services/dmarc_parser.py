@@ -119,16 +119,16 @@ class DMARCParser:
                         spf_result = (record_data.get('spf_auth_result') or '').lower()
                         spf_domain = record_data.get('spf_auth_domain')
                         if spf_domain:
-                            print('parse_and_store - spf 1')
+                            # print('parse_and_store - spf 1')
                             s.add(DmarcReportAuthDetail(
                                 dmarc_report_id=dmarc_report.id,
                                 type=AuthType.SPF,
                                 domain=spf_domain,
                                 result=AuthResult.PASS if spf_result == 'pass' else AuthResult.FAIL,
                             ))
-                            print('parse_and_store - spf 2')
+                            # print('parse_and_store - spf 2')
                             await s.flush()  # populate dmarc_report.id
-                            print('parse_and_store - spf 3')
+                            # print('parse_and_store - spf 3')
 
                         # DKIM auth
                         dkim_result = (record_data.get('dkim_auth_result') or '').lower()

@@ -59,6 +59,12 @@ set GCS_SERVICE_AGENT=service-%PROJECT_NUMBER%@gs-project-accounts.iam.gservicea
 
 set DLQ_TOPIC=dlq.%SUB%
 
+:: Enable necessary APIs
+echo -^> Enabling required APIs
+call gcloud services enable run.googleapis.com pubsub.googleapis.com storage.googleapis.com cloudbuild.googleapis.com ^
+  secretmanager.googleapis.com vpcaccess.googleapis.com iamcredentials.googleapis.com --project "%PROJECT_ID%"
+
+
 REM Timestamp safe for docker tags (no colons)
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd-HHmmss')"') do set "TS=%%I"
 set IMAGE=gcr.io/%PROJECT_ID%/%SERVICE%:%TS%
@@ -70,11 +76,6 @@ echo BUCKET=%BUCKET%, OBJECT_PREFIX=%OBJECT_PREFIX%
 echo IMAGE=%IMAGE%
 echo.
 
-REM 0) Enable required APIs
-echo -^> Enabling required APIs
-
-echo %PROJECT_ID%
-call gcloud services enable run.googleapis.com pubsub.googleapis.com storage.googleapis.com cloudbuild.googleapis.com --project "%PROJECT_ID%"
 echo %PROJECT_ID%
 REM (Optional) Force-create Pub/Sub service identity if it hasn't appeared yet
 call gcloud beta services identity create --service=pubsub.googleapis.com --project "%PROJECT_ID%"
@@ -115,9 +116,9 @@ timeout /t 5
 REM 2) Bucket-scoped IAM for Runtime SA
 echo Granting bucket IAM to runtime SA on gs://%BUCKET%
 @echo on
-call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectViewer"  --project "%PROJECT_ID%"
+REM call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectViewer"  --project "%PROJECT_ID%"
 @echo on
-call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectCreator" --project "%PROJECT_ID%"
+REM call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectCreator" --project "%PROJECT_ID%"
 @echo on
 REM Full control over objects in the bucket (get/list/create/delete/overwrite)
 call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectAdmin" --project "%PROJECT_ID%"
@@ -157,7 +158,7 @@ call gcloud run deploy "%SERVICE%" ^
   --timeout 60 ^
   --platform managed ^
   --project "%PROJECT_ID%" ^
-  --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID% ^
+  --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID%,GOOGLE_BUCKET=%BUCKET% ^
   --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
   --vpc-connector "%CONNECTOR%" ^
   --vpc-egress=private-ranges-only
@@ -187,13 +188,8 @@ call gcloud pubsub topics create "%DLQ_TOPIC%" --project "%PROJECT_ID%"
 REM 10) Allow service agent to publish to DLQ
 call gcloud pubsub topics add-iam-policy-binding "%DLQ_TOPIC%" --member="serviceAccount:%PUBSUB_SERVICE_AGENT%" --role="roles/pubsub.publisher" --project "%PROJECT_ID%"
 
-call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%PUBSUB_SERVICE_AGENT%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
-call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
-
-
-REM add to deploy flags:
---set-secrets DATABASE_URL=projects/%PROJECT_ID%/secrets/DATABASE_URL:latest
-
+REM call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%PUBSUB_SERVICE_AGENT%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
+REM call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
 
 @echo on
 REM 11) Create filtered push subscription with OIDC auth + DLQ
@@ -230,6 +226,21 @@ if "%OBJECT_PREFIX%"=="" (
 call gcloud run services update "%SERVICE%" ^
   --region "%REGION%" --project "%PROJECT_ID%" ^
   --update-env-vars PUBSUB_ALLOWED_AUDIENCE=%SERVICE_URL%/trigger
+
+REM to invoke the non triggered endpoints requires to give the user account ability to impersonate the pub sub service account.
+REM Uncomment the below lines if you wish to run the test.bat script
+
+REM call gcloud iam service-accounts add-iam-policy-binding ^
+REM   pubsub-push-dmarc-processor-sa@lappuai-prod.iam.gserviceaccount.com ^
+REM   --member="user:vivek.uppal@gmail.com" ^
+REM   --role="roles/iam.serviceAccountTokenCreator" ^
+REM   --project lappuai-prod
+
+REM call gcloud iam service-accounts add-iam-policy-binding ^
+REM   pubsub-push-dmarc-processor-sa@lappuai-prod.iam.gserviceaccount.com ^
+REM   --member="user:vivek.uppal@gmail.com" ^
+REM   --role="roles/iam.serviceAccountUser" ^
+REM   --project lappuai-prod
 
 
 echo.

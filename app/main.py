@@ -30,7 +30,7 @@ logging.basicConfig(
         logging.StreamHandler(),
     ]
 )
-logger = logging.getLogger("uvicorn")
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 # Config via env
@@ -241,8 +241,8 @@ def list_all_bucket_files(db: AsyncSession = Depends(get_db)):
             blob.name for blob in all_blobs
             if blob.name.startswith('processed/') and not blob.name.endswith('/')
         ]
-        # root_files = [blob.name for blob in all_blobs if not blob.name.startswith('processed/')]
-        # processed_files = [blob.name for blob in all_blobs if blob.name.startswith('processed/')]
+        root_files = [blob.name for blob in all_blobs if not blob.name.startswith('processed/')]
+        processed_files = [blob.name for blob in all_blobs if blob.name.startswith('processed/')]
 
         return {
             'status': 'success',

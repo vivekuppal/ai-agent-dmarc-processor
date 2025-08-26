@@ -1,5 +1,5 @@
-import os
 import logging
+from lxml import etree
 from abc import ABC, abstractmethod
 from typing import List, Callable, Dict, Optional, Tuple, Any
 from urllib.parse import urlparse, unquote
@@ -294,33 +294,48 @@ class FileProcessor(ABC):
             return 0
 
     def determine_report_source(self, file_name: str, content: bytes) -> str:
-        """Determine the report source based on file name or content"""
+        """Determine the report source based on filename, org_name in XML, or content string"""
         file_name_lower = file_name.lower()
 
-        # Simple heuristics based on file naming patterns
-        if 'google' in file_name_lower:
-            return 'Google'
-        elif 'microsoft' in file_name_lower or 'outlook' in file_name_lower:
-            return 'Microsoft'
-        elif 'yahoo' in file_name_lower:
-            return 'Yahoo'
-        elif 'amazon' in file_name_lower:
-            return 'Amazon'
+        # 1. Check filename first
+        mapping = {
+            'google': 'Google',
+            'microsoft': 'Microsoft',
+            'outlook': 'Microsoft',
+            'yahoo': 'Yahoo',
+            'amazon': 'Amazon',
+            'comcast': 'Comcast',
+            'reddit': 'Reddit',
+            'emailsrvr': 'emailsrvr',
+        }
+        for key, source in mapping.items():
+            if key in file_name_lower:
+                return source
 
-        # Try to determine from XML content (basic check)
+        # 2. Parse XML and check <feedback><report_metadata><org_name>
         try:
-            content_str = content.decode('utf-8').lower()
-            if 'google' in content_str:
-                return 'Google'
-            elif 'microsoft' in content_str or 'outlook' in content_str:
-                return 'Microsoft'
-            elif 'yahoo' in content_str:
-                return 'Yahoo'
+            root = etree.fromstring(content)
+            org_name_el: Optional[etree._Element] = root.find(".//report_metadata/org_name")
+            if org_name_el is not None and org_name_el.text:
+                org_name_lower = org_name_el.text.lower()
+                for key, source in mapping.items():
+                    if key in org_name_lower:
+                        return source
+        except Exception:
+            # swallow XML parse errors
+            pass
+
+        # 3. Fallback: scan content string
+        try:
+            content_str = content.decode("utf-8", errors="ignore").lower()
+            for key, source in mapping.items():
+                if key in content_str:
+                    return source
         except UnicodeDecodeError:
             pass
 
-        # Default to 'Unknown' if we can't determine
-        return 'Unknown'
+        # Default
+        return "Unknown"
 
     @abstractmethod
     async def process_file(self, content: bytes, file_path: str) -> bool:
@@ -332,7 +347,7 @@ class LocalFileProcessor(FileProcessor):
         """Process a single DMARC report file with concurrent
         processing protection
         """
-        logger.info(f"Processing file: {file_path}")
+        logger.info(f"LocalFileProcessor: Processing file: {file_path}")
         processing_id = 0
         try:
             # Calculate file hash
@@ -543,7 +558,7 @@ class GCSFileProcessor(FileProcessor):
             return None
 
     async def process_file(self, content: bytes, file_path: str) -> bool:
-        logger.info(f"Processing file: {file_path}")
+        logger.info(f"GCSFileProcessor: Processing file: {file_path}")
         relative_path = self.object_path_from_gcs_url(file_path)
         logger.info(f"Processing file relative path: {relative_path}")
         processing_id = 0
@@ -623,7 +638,7 @@ class GCSFileProcessor(FileProcessor):
     def process_gcs_file(self, blob: storage.Blob) -> bool:
         """Process a single DMARC report file"""
         file_path = f"gs://{self.bucket_name}/{blob.name}"
-        logger.info(f"Processing file: {file_path}")
+        logger.info(f"Processing gcs_file: {file_path}")
         try:
             content = self.download_file_content(blob)
             if content is None:

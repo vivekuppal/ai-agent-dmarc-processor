@@ -60,7 +60,7 @@ REM 2) Remove bucket-level IAM for runtime SA
 echo -^> Removing bucket IAM for runtime SA on gs://%BUCKET%
 REM call gcloud storage buckets remove-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectViewer"  --project "%PROJECT_ID%" >nul 2>&1
 REM call gcloud storage buckets remove-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectCreator" --project "%PROJECT_ID%" >nul 2>&1
-REM call gcloud storage buckets remove-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectAdmin"   --project "%PROJECT_ID%" >nul 2>&1
+call gcloud storage buckets remove-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectAdmin"   --project "%PROJECT_ID%"
 
 REM 3) Remove Pub/Sub IAM bindings (publisher on DLQs & topic)
 echo -^> Removing Pub/Sub IAM bindings
@@ -113,14 +113,24 @@ REM 11) (Optional) Delete container images (uncomment ONE of the blocks below)
 REM ---- (a) Google Container Registry: gcr.io ----
 for /f %%G in ('gcloud container images list-tags "gcr.io/%PROJECT_ID%/%SERVICE%" --format^=get^(digest^)') do (
   echo -^> Deleting image digest %%G from gcr.io/%PROJECT_ID%/%SERVICE%
-  gcloud container images delete -q "gcr.io/%PROJECT_ID%/%SERVICE%@%%G" --force-delete-tags
+  call gcloud container images delete -q "gcr.io/%PROJECT_ID%/%SERVICE%@%%G" --force-delete-tags
 )
 
 REM ---- (b) Artifact Registry (example repo "services" in us-east1) ----
-for /f "tokens=*" %%I in ('gcloud artifacts docker images list "us-east1-docker.pkg.dev/%PROJECT_ID%/services/%SERVICE%" --format^=get^(version^)') do (
-   echo -^> Deleting AR image %%I
-   gcloud artifacts docker images delete "%%I" --quiet
-)
+REM for /f "tokens=*" %%I in ('gcloud artifacts docker images list "us-east1-docker.pkg.dev/%PROJECT_ID%/services/%SERVICE%" --format^=get^(version^)') do (
+REM    echo -^> Deleting AR image %%I
+REM    call gcloud artifacts docker images delete "%%I" --quiet
+REM )
+
+call gcloud secrets remove-iam-policy-binding STAGING_DATABASE_URL ^
+  --member="serviceAccount:%RUNTIME_SA%" ^
+  --role="roles/secretmanager.secretAccessor" ^
+  --project "%PROJECT_ID%" --quiet
+
+REM -- Remove the VPC Access User role from the runtime SA
+call gcloud projects remove-iam-policy-binding "%PROJECT_ID%" ^
+  --member="serviceAccount:%RUNTIME_SA%" ^
+  --role="roles/vpcaccess.user" --quiet
 
 
 
