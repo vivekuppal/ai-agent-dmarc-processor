@@ -13,13 +13,13 @@ set PROJECT_ID=lappuai-prod
 set REGION=us-east1
 
 REM Cloud Run service (one component). If you deployed multiple, run per service or duplicate this section.
-set SERVICE=ai-agent-spoofing
+set SERVICE=ai-agent-dmarc-processor
 
 REM Pub/Sub topic that GCS publishes to
-set TOPIC=ai-agent-spoofing-topic
+set TOPIC=ai-agent-dmarc-processor-topic
 
 REM Subscriptions to delete (space-separated)
-set SUB=ai-agent-spoofing-sub
+set SUB=ai-agent-dmarc-processor-sub
 
 REM If DLQs follow "dlq.<subscription>", leave DLQ_TOPICS empty to auto-derive.
 REM Otherwise set explicitly, e.g.: set DLQ_TOPICS=dlq.sub-ai-scorer custom-dlq
@@ -29,8 +29,8 @@ REM Bucket used for notifications and bucket-level IAM (no gs:// prefix)
 set BUCKET=lai-dmarc-aggregate-reports
 
 REM Service accounts (names, not full emails)
-set RUNTIME_SA_NAME=ai-agent-spoofing-sa
-set PUSH_SA_NAME=pubsub-push-spoofing-sa
+set RUNTIME_SA_NAME=ai-agent-dmarc-processor-sa
+set PUSH_SA_NAME=pubsub-push-dmarc-processor-sa
 
 REM ========== DERIVED ==========
 for /f %%P in ('call gcloud projects describe "%PROJECT_ID%" --format="value(projectNumber)"') do set PROJECT_NUMBER=%%P
@@ -46,15 +46,15 @@ for %%S in (%SUB%) do set DLQ_DERIVED=!DLQ_DERIVED! dlq.%%S
 echo === Teardown starting for project: %PROJECT_ID% (region: %REGION%) ===
 
 REM 1) Delete GCS notifications on %BUCKET% that reference %TOPIC%
-echo -^> Deleting GCS bucket notifications on gs://%BUCKET% that target topic "%TOPIC%"
-for /f %%I in ('call gcloud storage buckets notifications list gs://%BUCKET% --project "%PROJECT_ID%" --format="value(""Notification Configuration"".id)" 2') do (
-  for /f "usebackq delims=" %%T in (`call gcloud storage buckets notifications describe projects/_/buckets/%BUCKET%/notificationConfigs/%%I --project "%PROJECT_ID%" --format="value(""Notification Configuration"".topic)" 2`) do (
-    if /I "%%T"=="%TOPIC%" (
-      echo    - deleting notification ID %%I
-      call gsutil notification delete gs://%BUCKET% %%I
-    )
-  )
-)
+REM echo -^> Deleting GCS bucket notifications on gs://%BUCKET% that target topic "%TOPIC%"
+REM for /f %%I in ('call gcloud storage buckets notifications list gs://%BUCKET% --project "%PROJECT_ID%" --format="value(""Notification Configuration"".id)" 2') do (
+REM  for /f "usebackq delims=" %%T in (`call gcloud storage buckets notifications describe projects/_/buckets/%BUCKET%/notificationConfigs/%%I --project "%PROJECT_ID%" --format="value(""Notification Configuration"".topic)" 2`) do (
+REM    if /I "%%T"=="%TOPIC%" (
+REM      echo    - deleting notification ID %%I
+REM      call gsutil notification delete gs://%BUCKET% %%I
+REM    )
+REM  )
+REM)
 
 REM 2) Remove bucket-level IAM for runtime SA
 echo -^> Removing bucket IAM for runtime SA on gs://%BUCKET%

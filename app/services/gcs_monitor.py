@@ -406,7 +406,11 @@ class GCSFileProcessor(FileProcessor):
         if lbucket:
             self.bucket_name = lbucket
         else:
-            self.bucket_name = os.environ.get("GOOGLE_BUCKET")
+            # self.bucket_name = os.environ.get("GOOGLE_BUCKET")
+            # hard coded here on purpose, since we do not want to
+            # provide an env variable to the container. Bucket name
+            # should be part of pub sub notification
+            self.bucket_name = 'lai-dmarc-aggregate-reports'
 
         self.client = None
         self.bucket = None

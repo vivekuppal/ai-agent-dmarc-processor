@@ -1,0 +1,39 @@
+# Ignore Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+
+# Ignore virtual environments
+venv/
+.env/
+.venv/
+
+# Ignore editor/IDE files
+*.swp
+*.swo
+*.bak
+.DS_Store
+.vscode/
+.idea/
+
+# Ignore OS or backup files
+*.log
+*.tmp
+*.bak
+
+# Ignore local testing/output files
+*.sqlite
+*.db
+*.json
+results/
+output/
+tests/
+
+# Ignore local configuration files
+smtp.txt
+staging.txt
+
+# Don't ignore these explicitly required files

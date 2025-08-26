@@ -166,7 +166,8 @@ def get_database_url() -> str:
     """GET URL for DB"""
     project_id = os.environ["GCP_PROJECT_ID"]
     if os.environ.get("GCE_ENV"):
-        return get_secret(project_id=project_id, secret_name="DATABASE_URL")
+        return get_secret(project_id=project_id,
+                          secret_name="STAGING_DATABASE_URL")
 
     return os.environ.get("DATABASE_URL")
 

@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 
 from app.processor import process_notification
 from app.utils import verify_pubsub_jwt_if_required, json_dumps
-from app.db import engine, get_db
+from app.db import init_engine, dispose_engine, get_db, engine
 from app.models import Base
 
 
@@ -45,15 +45,15 @@ READ_CHUNK_SIZE = int(os.getenv("READ_CHUNK_SIZE", "0"))  # 0 -> entire file
 _storage_client: Optional[storage.Client] = None
 
 
-# TODO: do startup checks here
 @asynccontextmanager
 async def lifespan(local_app: FastAPI):
     # If you want to run startup checks or migrations, do it here
     # e.g., verify DB connectivity:
     # async with engine.begin() as conn:
     #     await conn.execute(text("SELECT 1"))
+    init_engine()
     yield
-    await engine.dispose()
+    await dispose_engine()
 
 
 app = FastAPI(title=COMPONENT_NAME, lifespan=lifespan)
@@ -313,11 +313,13 @@ async def test_db(db: AsyncSession = Depends(get_db)):
     """Test database connectivity."""
     from sqlalchemy import text
 
+    logger.info("DB probe: starting")
     try:
         await db.execute(text("SELECT 1"))
+        logger.info("DB probe: success")
         return {"status": "success"}
     except Exception as e:
-        # optional: logger.exception("db_test_failed")
+        logger.exception("DB probe failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

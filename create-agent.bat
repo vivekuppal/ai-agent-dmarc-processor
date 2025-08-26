@@ -16,13 +16,15 @@ set REGION=us-east1
 
 REM Ingest bucket (no gs://)
 set BUCKET=lai-dmarc-aggregate-reports
+set CONNECTOR=lai-vpc-connector
 
 REM Component / service name (deploy one per run)
-set SERVICE=ai-agent-spoofing
+set SERVICE=ai-agent-dmarc-processor
+
 
 REM Pub/Sub plumbing
-set TOPIC=ai-agent-spoofing-topic
-set SUB=ai-agent-spoofing-sub
+set TOPIC=ai-agent-dmarc-processor-topic
+set SUB=ai-agent-dmarc-processor-sub
 
 REM GCS object prefix to trigger on (can be empty for all)
 set OBJECT_PREFIX=reports/
@@ -35,8 +37,8 @@ REM Dead-letter topic name (defaults to dlq.<SUB> if left blank)
 set DLQ_TOPIC=
 
 REM Service accounts (names only)
-set RUNTIME_SA_NAME=ai-agent-spoofing-sa
-set PUSH_SA_NAME=pubsub-push-spoofing-sa
+set RUNTIME_SA_NAME=ai-agent-dmarc-processor-sa
+set PUSH_SA_NAME=pubsub-push-dmarc-processor-sa
 
 REM ===== Optional Cloud Run runtime envs for the app =====
 set ENV_COMPONENT_NAME=%SERVICE%
@@ -91,7 +93,7 @@ if defined RESULT1 (
     echo Creating service account %RUNTIME_SA_NAME%...
     call gcloud iam service-accounts create "%RUNTIME_SA_NAME%" ^
         --project "%PROJECT_ID%" ^
-        --display-name "AI Spoofing Agent Runtime SA"
+        --display-name "AI DMARC processor Agent Runtime SA"
 )
 
 @echo on
@@ -105,7 +107,7 @@ if defined RESULT2 (
     echo Creating service account %PUSH_SA_NAME%...
     call gcloud iam service-accounts create "%PUSH_SA_NAME%" ^
         --project "%PROJECT_ID%" ^
-        --display-name "Pub/Sub Push Spoofing Invoker SA"
+        --display-name "Pub/Sub Push DMARC processor Invoker SA"
 )
 
 @echo on
@@ -115,9 +117,16 @@ echo Granting bucket IAM to runtime SA on gs://%BUCKET%
 @echo on
 call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectViewer"  --project "%PROJECT_ID%"
 @echo on
-timeout /t 5
 call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectCreator" --project "%PROJECT_ID%"
+@echo on
+REM Full control over objects in the bucket (get/list/create/delete/overwrite)
+call gcloud storage buckets add-iam-policy-binding "gs://%BUCKET%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/storage.objectAdmin" --project "%PROJECT_ID%"
+
+REM The Cloud Run runtime SA must have VPC Access User
+call gcloud projects add-iam-policy-binding "%PROJECT_ID%" --member="serviceAccount:%RUNTIME_SA%" --role="roles/vpcaccess.user"
+@echo on
 timeout /t 5
+
 REM 3) Allow Pub/Sub service agent to mint OIDC token for PUSH_SA
 echo Granting roles/iam.serviceAccountTokenCreator on %PUSH_SA% to %PUBSUB_SERVICE_AGENT%
 call gcloud iam service-accounts add-iam-policy-binding "%PUSH_SA%" ^
@@ -129,6 +138,10 @@ REM 4) Build container (Cloud Build) and push to gcr.io
 @echo on
 echo Building image %IMAGE%
 call gcloud builds submit --tag "%IMAGE%" --project "%PROJECT_ID%"
+timeout /t 5
+
+call gcloud secrets add-iam-policy-binding DATABASE_URL --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
+call gcloud secrets add-iam-policy-binding STAGING_DATABASE_URL --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
 timeout /t 5
 
 REM 5) Deploy Cloud Run (private)
@@ -144,7 +157,11 @@ call gcloud run deploy "%SERVICE%" ^
   --timeout 60 ^
   --platform managed ^
   --project "%PROJECT_ID%" ^
-  --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%
+  --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID% ^
+  --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
+  --vpc-connector "%CONNECTOR%" ^
+  --vpc-egress=private-ranges-only
+
 
 REM 6) Get service URL
 for /f "usebackq tokens=*" %%U in (`gcloud run services describe "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --format^=value^(status.url^)`) do set "SERVICE_URL=%%U"
@@ -173,20 +190,26 @@ call gcloud pubsub topics add-iam-policy-binding "%DLQ_TOPIC%" --member="service
 call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%PUBSUB_SERVICE_AGENT%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
 call gcloud secrets add-iam-policy-binding SMTP_PASSWORD --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
 
+
+REM add to deploy flags:
+--set-secrets DATABASE_URL=projects/%PROJECT_ID%/secrets/DATABASE_URL:latest
+
+
 @echo on
 REM 11) Create filtered push subscription with OIDC auth + DLQ
 echo Creating subscription %SUB% (filter + push auth + DLQ)
 call gcloud pubsub subscriptions create "%SUB%" ^
   --topic="%TOPIC%" ^
   --message-filter="%FILTER%" ^
-  --push-endpoint="%SERVICE_URL%/" ^
+  --push-endpoint="%SERVICE_URL%/trigger" ^
   --push-auth-service-account="%PUSH_SA%" ^
-  --push-auth-token-audience="%SERVICE_URL%" ^
+  --push-auth-token-audience="%SERVICE_URL%/trigger" ^
   --dead-letter-topic="%DLQ_TOPIC%" ^
   --max-delivery-attempts=10 ^
   --min-retry-delay=10s ^
   --max-retry-delay=600s ^
   --project "%PROJECT_ID%"
+
 
 REM 12) (DLQ flow) Let service agent ack when forwarding to DLQ
 call gcloud pubsub subscriptions add-iam-policy-binding "%SUB%" --member="serviceAccount:%PUBSUB_SERVICE_AGENT%" --role="roles/pubsub.subscriber" --project "%PROJECT_ID%"
@@ -202,6 +225,12 @@ if "%OBJECT_PREFIX%"=="" (
 ) else (
   call gcloud storage buckets notifications create "gs://%BUCKET%" --topic="%TOPIC%" --event-types=OBJECT_FINALIZE --payload-format=json --object-prefix="%OBJECT_PREFIX%" --project="%PROJECT_ID%"
 )
+
+:: update Cloud Run env (after deploy) to match
+call gcloud run services update "%SERVICE%" ^
+  --region "%REGION%" --project "%PROJECT_ID%" ^
+  --update-env-vars PUBSUB_ALLOWED_AUDIENCE=%SERVICE_URL%/trigger
+
 
 echo.
 echo === All set! ===

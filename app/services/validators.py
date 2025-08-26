@@ -116,7 +116,7 @@ class DuplicateFileValidator(BaseValidator):
             file_hash = hashlib.sha256(content).hexdigest()
 
             # Import here to avoid circular imports
-            from models import ProcessedFile
+            from app.models import ProcessedFile
             from sqlalchemy.orm import sessionmaker
 
             # Check if file hash exists in database
