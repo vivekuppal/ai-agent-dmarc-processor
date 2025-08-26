@@ -181,7 +181,7 @@ class ProcessedFile(Base):
     status = Column(String(20), nullable=False, default='done', index=True)  # processing, done, error, duplicate
 
     # Relationships
-    report = relationship("DMARCReport", backref="processed_files")
+    report = relationship("DMARCReport", backref="processed_file")
     duplicate_of = relationship("ProcessedFile", remote_side=[id], backref="duplicates")
 
     def __repr__(self):

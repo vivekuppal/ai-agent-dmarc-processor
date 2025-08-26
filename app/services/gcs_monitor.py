@@ -1,5 +1,5 @@
 import logging
-from lxml import etree
+import os
 from abc import ABC, abstractmethod
 from typing import List, Callable, Dict, Optional, Tuple, Any
 from urllib.parse import urlparse, unquote
@@ -7,6 +7,7 @@ from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
 from sqlalchemy import select, insert, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from lxml import etree
 from app.models import ProcessedFile
 from app.services.validators import ValidationFramework
 from app.services.dmarc_parser import DMARCParser
@@ -60,6 +61,7 @@ class FileProcessor(ABC):
         # Local
         if scheme is None or scheme == "file":
             ctor = cls._registry.get("file")
+            print(f"scheme: {scheme}. Creating LocalFileProcessor")
             if not ctor:
                 raise ValueError("No handler registered for 'file' scheme.")
             # For file:// we already stripped leading slash in path above
@@ -68,6 +70,7 @@ class FileProcessor(ABC):
 
         # GCS
         if scheme in ("gs", "gcs"):
+            print(f"scheme: {scheme}. Creating GCSFileProcessor")
             ctor = cls._registry.get("gs")
             if not ctor:
                 raise ValueError("No handler registered for 'gs' scheme.")
@@ -92,7 +95,9 @@ class FileProcessor(ABC):
         try:
             result = await self.db.execute(
                 select(ProcessedFile).where(
-                    ProcessedFile.file_hash == file_hash)
+                    ProcessedFile.file_hash == file_hash,
+                    ProcessedFile.duplicate_id.is_(None)
+                )
             )
             existing_file = result.scalar_one_or_none()
 
@@ -113,7 +118,7 @@ class FileProcessor(ABC):
             logger.error(f"Error checking file processing status: {str(e)}")
             return "skip", 0
         finally:
-             # IMPORTANT: close the implicit read tx so later code can start a new one
+            # IMPORTANT: close the implicit read tx so later code can start a new one
             if self.db.in_transaction():
                 await self.db.rollback()
 
@@ -343,6 +348,8 @@ class FileProcessor(ABC):
 
 
 class LocalFileProcessor(FileProcessor):
+    """Process local files with concurrent processing protection."""
+
     async def process_file(self, content: bytes, file_path: str) -> bool:
         """Process a single DMARC report file with concurrent
         processing protection
@@ -409,17 +416,19 @@ class LocalFileProcessor(FileProcessor):
             logger.error(f"LocalFileProcessor: Error processing file {file_path}: {str(e)}")
             # Mark as error if we have a processing lock
             if processing_id > 0:
-                self.mark_file_as_error(processing_id)
+                await self.mark_file_as_error(processing_id)
             return False
 
 
 class GCSFileProcessor(FileProcessor):
+    """Process GCS files with concurrent processing protection."""
 
     def __init__(self, db: AsyncSession, file_path: str = None,
-                 lbucket: str = None):
+                 bucket: str = None):
+        print("GCSFileProcessor init")
         super().__init__(db, file_path)
-        if lbucket:
-            self.bucket_name = lbucket
+        if bucket:
+            self.bucket_name = bucket
         else:
             # self.bucket_name = os.environ.get("GOOGLE_BUCKET")
             # hard coded here on purpose, since we do not want to
@@ -522,6 +531,33 @@ class GCSFileProcessor(FileProcessor):
             logger.error(f"Error listing files in bucket: {str(e)}")
             return []
 
+    def copy_file_to(self, blob: storage.Blob, destination: str) -> bool:
+        """
+        Copy a GCS blob to another location in the same bucket.
+
+        Args:
+            blob: source blob object
+            destination: destination object path. Can be:
+                - "processed/<filename>.xml" (full path), or
+                - "processed/" (folder; will reuse the source filename)
+        """
+        try:
+            # If destination is a folder, append the source filename
+            if destination.endswith("/"):
+                destination = f"{destination}{os.path.basename(blob.name)}"
+
+            dest_blob = self.bucket.blob(destination)
+
+            # Copy data (and metadata) to the new object
+            dest_blob.rewrite(blob)  # simple rewrite; good for same-bucket copies
+
+            logger.info(f"Copied file: {blob.name} -> {destination}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to copy file: {blob.name} -> {destination} - {e}")
+            return False
+
     def move_file_to_processed(self, blob: storage.Blob) -> bool:
         """Move successfully processed file to processed folder"""
         try:
@@ -567,7 +603,7 @@ class GCSFileProcessor(FileProcessor):
             file_hash = calculate_file_hash(content)
 
             # Check processing status for concurrent access control
-            action, existing_file_id = self.check_file_processing_status(
+            action, existing_file_id = await self.check_file_processing_status(
                 file_hash, file_path)
             file_blob = self.bucket.blob(relative_path)
 
@@ -580,15 +616,15 @@ class GCSFileProcessor(FileProcessor):
                 return True
             elif action == 'duplicate':
                 # Mark as duplicate, move to processed
-                self.mark_file_as_duplicate(file_hash, file_path,
-                                            existing_file_id)
-                self.move_file_to_processed(file_blob)
+                await self.mark_file_as_duplicate(file_hash, file_path,
+                                                  existing_file_id)
+                # await self.move_file_to_processed(file_blob)
                 logger.info(f"File marked as duplicate: {file_path} (original_id: {existing_file_id})")
                 return True
             elif action == 'process':
                 # Start processing - this creates the lock
-                processing_id = self.start_file_processing(file_hash,
-                                                           file_path)
+                processing_id = await self.start_file_processing(file_hash,
+                                                                 file_path)
                 if processing_id == 0:
                     logger.error(f"Failed to start processing lock for: {file_path}")
                     return False
@@ -605,20 +641,25 @@ class GCSFileProcessor(FileProcessor):
                                                              file_path)
             if not validation_result.is_valid:
                 logger.error(f"File validation failed for {file_path}: {validation_result.errors}")
-                self.mark_file_as_error(processing_id)
+                await self.mark_file_as_error(processing_id)
                 return False
 
             # Parse DMARC report (creates entries in dmarc_reports and
             # dmarc_report_details tables)
-            dmarc_report_id = self.parser.parse_and_store(content, file_path,
-                                                          report_source)
+            dmarc_report_id = await self.parser.parse_and_store(content,
+                                                                file_path,
+                                                                report_source)
             if not dmarc_report_id:
                 logger.error(f"Failed to parse DMARC report: {file_path}")
-                self.mark_file_as_error(processing_id)
+                await self.mark_file_as_error(processing_id)
                 return False
 
             # Mark processing as complete
-            self.complete_file_processing(processing_id, dmarc_report_id)
+            await self.complete_file_processing(processing_id, dmarc_report_id)
+
+            # Copy file to spoofing folder. At the time of writing this is used
+            # as input by the spoofing ai agent
+            self.copy_file_to(file_blob, "spoofing/")
 
             # Move file to processed folder
             if self.move_file_to_processed(file_blob):
@@ -632,10 +673,10 @@ class GCSFileProcessor(FileProcessor):
             logger.error(f"Error 2 processing file {file_path}: {str(e)}")
             # Mark as error if we have a processing lock
             if processing_id > 0:
-                self.mark_file_as_error(processing_id)
+                await self.mark_file_as_error(processing_id)
             return False
 
-    def process_gcs_file(self, blob: storage.Blob) -> bool:
+    async def process_gcs_file(self, blob: storage.Blob) -> bool:
         """Process a single DMARC report file"""
         file_path = f"gs://{self.bucket_name}/{blob.name}"
         logger.info(f"Processing gcs_file: {file_path}")
@@ -648,7 +689,7 @@ class GCSFileProcessor(FileProcessor):
             logger.error(f"Error processing gcs file {file_path}: {str(e)}")
             return False
 
-    def process_all_files(self):
+    async def process_all_files(self):
         """Process all DMARC report files in the bucket"""
         logger.info("Starting GCS bucket monitoring cycle")
 
@@ -664,7 +705,8 @@ class GCSFileProcessor(FileProcessor):
 
             for blob in xml_files:
                 try:
-                    if self.process_gcs_file(blob):
+                    res = await self.process_gcs_file(blob)
+                    if res:
                         processed_count += 1
                     else:
                         failed_count += 1

@@ -353,6 +353,15 @@ async def pubsub_push(request: Request,
 
     # Idempotency key (store/consult in your DB in future step)
     idem_key = f"{bucket}/{object_id}#{generation if generation is not None else 'live'}"
+    print(json_dumps({
+        "msg": "event_received",
+        "component": COMPONENT_NAME,
+        "bucket": bucket,
+        "object": object_id,
+        "generation": generation,
+        "idem_key": idem_key,
+        "file_path": f"gs://{bucket}/{object_id}"
+    }))
     logger.info(json_dumps({
         "msg": "event_received",
         "component": COMPONENT_NAME,
@@ -384,7 +393,8 @@ async def pubsub_push(request: Request,
                 "generation": generation,
                 "component": COMPONENT_NAME,
                 "raw_event": raw,
-                "filename": object_id
+                "filename": object_id,
+                "filepath": f"gs://{bucket}/{object_id}"
             },
             db=db
         )
