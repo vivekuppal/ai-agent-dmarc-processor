@@ -38,7 +38,7 @@ call gcloud run deploy "%SERVICE%" ^
   --platform managed ^
   --project "%PROJECT_ID%" ^
   --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID% ^
-  --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
+  --set-secrets DATABASE_URL=ASYNC_DATABASE_URL:latest ^
   --vpc-connector "%CONNECTOR%" ^
   --vpc-egress=private-ranges-only
 
