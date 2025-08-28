@@ -351,6 +351,7 @@ async def pubsub_push(request: Request,
             return Response(status_code=e.status_code)
         raise
 
+    delivery_attempt = int(request.headers.get("X-Goog-Delivery-Attempt", "1"))
     # Idempotency key (store/consult in your DB in future step)
     idem_key = f"{bucket}/{object_id}#{generation if generation is not None else 'live'}"
     print(json_dumps({
@@ -360,7 +361,8 @@ async def pubsub_push(request: Request,
         "object": object_id,
         "generation": generation,
         "idem_key": idem_key,
-        "file_path": f"gs://{bucket}/{object_id}"
+        "file_path": f"gs://{bucket}/{object_id}",
+        "delivery_attempt": delivery_attempt
     }))
     logger.info(json_dumps({
         "msg": "event_received",
@@ -369,8 +371,35 @@ async def pubsub_push(request: Request,
         "object": object_id,
         "generation": generation,
         "idem_key": idem_key,
-        "file_path": f"gs://{bucket}/{object_id}"
+        "file_path": f"gs://{bucket}/{object_id}",
+        "delivery_attempt": delivery_attempt
     }))
+
+    # Prevent duplicate pub sub notification processing if the file
+    # has already moved
+    client = get_storage()
+    bucket_ref = client.bucket(bucket)
+    if generation is not None:
+        # check that the exact generation still exists
+        blob = storage.Blob(object_id, bucket_ref, generation=generation)
+        exists = blob.exists(client)
+    else:
+        # check live object
+        blob = bucket_ref.blob(object_id)
+        exists = blob.exists(client)
+
+    if not exists:
+        logger.info(json_dumps({
+            "msg": "duplicate_delivery_object_missing",
+            "reason": "likely already processed and moved",
+            "bucket": bucket,
+            "object": object_id,
+            "generation": generation,
+            "delivery_attempt": delivery_attempt,
+            "action": "ack_skip",
+        }))
+        # Ack the message so Pub/Sub stops retrying
+        return Response(status_code=204)
 
     # 1) Read object (by generation when available)
     try:
@@ -407,8 +436,6 @@ async def pubsub_push(request: Request,
     try:
         if OUTPUT_PREFIX:
             out_name = f"{OUTPUT_PREFIX}{object_id}.gen{generation if generation is not None else 'live'}.json"
-            client = get_storage()
-            bucket_ref = client.bucket(bucket)
             out_blob = bucket_ref.blob(out_name)
             out_blob.upload_from_string(
                 data=json_dumps({"result": result, "source": idem_key}),

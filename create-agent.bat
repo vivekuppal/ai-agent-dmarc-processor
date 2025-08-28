@@ -141,7 +141,7 @@ call gcloud builds submit --tag "%IMAGE%" --project "%PROJECT_ID%"
 timeout /t 5
 
 call gcloud secrets add-iam-policy-binding DATABASE_URL --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
-call gcloud secrets add-iam-policy-binding STAGING_DATABASE_URL --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
+call gcloud secrets add-iam-policy-binding ASYNC_DATABASE_URL --member="serviceAccount:%RUNTIME_SA%" --role="roles/secretmanager.secretAccessor" --project "%PROJECT_ID%"
 timeout /t 5
 
 REM 5) Deploy Cloud Run (private)
@@ -160,7 +160,7 @@ call gcloud run deploy "%SERVICE%" ^
   --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID%,GOOGLE_BUCKET=%BUCKET% ^
   --vpc-connector "%CONNECTOR%" ^
   --vpc-egress=private-ranges-only
-REM --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
+REM --set-secrets DATABASE_URL=ASYNC_DATABASE_URL:latest ^
 
 REM 6) Get service URL
 for /f "usebackq tokens=*" %%U in (`gcloud run services describe "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --format^=value^(status.url^)`) do set "SERVICE_URL=%%U"
@@ -173,7 +173,7 @@ call gcloud run services add-iam-policy-binding "%SERVICE%" --region "%REGION%" 
 REM 8) (Optional) In-app JWT verification audience
 if /I "%ENV_REQUIRE_JWT%"=="true" (
   echo -^> Enabling in-app JWT verification (REQUIRE_JWT=true, AUD=%SERVICE_URL%)
-  call gcloud run services update "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --update-env-vars REQUIRE_JWT=true,PUBSUB_ALLOWED_AUDIENCE=%SERVICE_URL%
+  call gcloud run services update "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --update-env-vars REQUIRE_JWT=true,PUBSUB_ALLOWED_AUDIENCE=%SERVICE_URL%/trigger
 )
 
 REM 9) Pub/Sub topic + DLQ

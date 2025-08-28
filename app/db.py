@@ -20,11 +20,14 @@ SessionLocal: Optional[async_sessionmaker[AsyncSession]] = None
 
 
 class Settings(BaseSettings):
+    """
+    Settings for the DB
+    """
     model_config = SettingsConfigDict(env_prefix="", extra="ignore")
     DATABASE_URL: str | None = None
     GCE_ENV: bool = False
     GCP_PROJECT_ID: str | None = None
-    DB_SECRET_NAME: str = "STAGING_DATABASE_URL"  # change if needed
+    DB_SECRET_NAME: str = "DATABASE_URL"  # change if needed
 
 
 settings = Settings()

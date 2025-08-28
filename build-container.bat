@@ -12,6 +12,12 @@ set ENV_OBJECT_PREFIX=reports/
 set ENV_OUTPUT_PREFIX=outputs/%SERVICE%/
 
 
+set PUSH_SA_NAME=pubsub-push-dmarc-processor-sa
+
+set PUSH_SA=%PUSH_SA_NAME%@%PROJECT_ID%.iam.gserviceaccount.com
+
+
+
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd-HHmmss')"') do set "TS=%%I"
 set IMAGE=gcr.io/%PROJECT_ID%/%SERVICE%:%TS%
 
@@ -19,6 +25,7 @@ set IMAGE=gcr.io/%PROJECT_ID%/%SERVICE%:%TS%
 call gcloud builds submit --tag "%IMAGE%" --project "%PROJECT_ID%"
 timeout /t 5
 
+@echo on
 REM Deploy Cloud Run (private)
 call gcloud run deploy "%SERVICE%" ^
   --image "%IMAGE%" ^
@@ -35,6 +42,6 @@ call gcloud run deploy "%SERVICE%" ^
   --vpc-connector "%CONNECTOR%" ^
   --vpc-egress=private-ranges-only
 
-
+@echo on
 echo Granting run.invoker on %SERVICE% to %PUSH_SA%
 call gcloud run services add-iam-policy-binding "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --member="serviceAccount:%PUSH_SA%" --role="roles/run.invoker"

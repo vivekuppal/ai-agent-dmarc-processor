@@ -35,5 +35,6 @@ tests/
 # Ignore local configuration files
 smtp.txt
 staging.txt
+async-prod.txt
 
 # Don't ignore these explicitly required files
