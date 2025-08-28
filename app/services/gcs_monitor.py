@@ -32,7 +32,10 @@ class FileProcessor(ABC):
 
     # ----- Factory registration -----
     @classmethod
-    def register_scheme(cls, scheme: str, constructor: Callable[..., "FileProcessor"]) -> None:
+    def register_scheme(cls, scheme: str,
+                        constructor: Callable[..., "FileProcessor"]) -> None:
+        """Register a constructor for filename pattern
+        """
         cls._registry[scheme.lower()] = constructor
 
     @staticmethod
@@ -299,7 +302,8 @@ class FileProcessor(ABC):
             return 0
 
     def determine_report_source(self, file_name: str, content: bytes) -> str:
-        """Determine the report source based on filename, org_name in XML, or content string"""
+        """Determine the report source based on filename or org_name in XML or XML content.
+        Fallback: return org_name value if present, else 'Unknown'."""
         file_name_lower = file_name.lower()
 
         # 1. Check filename first
@@ -311,7 +315,12 @@ class FileProcessor(ABC):
             'amazon': 'Amazon',
             'comcast': 'Comcast',
             'reddit': 'Reddit',
-            'emailsrvr': 'emailsrvr',
+            'emailsrvr': 'Emailsrvr',
+            'mimecast': 'Mimecast',
+            'netscape': 'Netscape',
+            'thalesgroup': 'Thalesgroup',
+            'aol': 'AOL',
+            'yandex': 'Yandex'
         }
         for key, source in mapping.items():
             if key in file_name_lower:
@@ -322,15 +331,18 @@ class FileProcessor(ABC):
             root = etree.fromstring(content)
             org_name_el: Optional[etree._Element] = root.find(".//report_metadata/org_name")
             if org_name_el is not None and org_name_el.text:
-                org_name_lower = org_name_el.text.lower()
+                org_name_text = org_name_el.text.strip()
+                org_name_lower = org_name_text.lower()
                 for key, source in mapping.items():
                     if key in org_name_lower:
                         return source
+                # 3. If no mapping match, return the org_name value itself
+                return org_name_text
         except Exception:
             # swallow XML parse errors
             pass
 
-        # 3. Fallback: scan content string
+        # 4. Fallback: scan content string
         try:
             content_str = content.decode("utf-8", errors="ignore").lower()
             for key, source in mapping.items():
@@ -339,11 +351,12 @@ class FileProcessor(ABC):
         except UnicodeDecodeError:
             pass
 
-        # Default
+        # 5. Default
         return "Unknown"
 
     @abstractmethod
     async def process_file(self, content: bytes, file_path: str) -> bool:
+        """Process a single DMARC report file"""
         pass
 
 
@@ -644,8 +657,8 @@ class GCSFileProcessor(FileProcessor):
                 await self.mark_file_as_error(processing_id)
                 return False
 
-            # Parse DMARC report (creates entries in dmarc_reports and
-            # dmarc_report_details tables)
+            # Parse DMARC report (creates entries in dmarc_reports,
+            # dmarc_report_details, dmarc_report_auth tables)
             dmarc_report_id = await self.parser.parse_and_store(content,
                                                                 file_path,
                                                                 report_source)

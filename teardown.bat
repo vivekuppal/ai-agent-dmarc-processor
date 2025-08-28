@@ -26,7 +26,7 @@ REM Otherwise set explicitly, e.g.: set DLQ_TOPICS=dlq.sub-ai-scorer custom-dlq
 set DLQ_TOPICS=
 
 REM Bucket used for notifications and bucket-level IAM (no gs:// prefix)
-set BUCKET=lai-dmarc-aggregate-reports
+set BUCKET=lai-dmarc-reports
 
 REM Service accounts (names, not full emails)
 set RUNTIME_SA_NAME=ai-agent-dmarc-processor-sa

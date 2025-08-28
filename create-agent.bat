@@ -15,12 +15,11 @@ echo PROJECT_ID=%PROJECT_ID%
 set REGION=us-east1
 
 REM Ingest bucket (no gs://)
-set BUCKET=lai-dmarc-aggregate-reports
+set BUCKET=lai-dmarc-reports
 set CONNECTOR=lai-vpc-connector
 
 REM Component / service name (deploy one per run)
 set SERVICE=ai-agent-dmarc-processor
-
 
 REM Pub/Sub plumbing
 set TOPIC=ai-agent-dmarc-processor-topic
@@ -159,10 +158,9 @@ call gcloud run deploy "%SERVICE%" ^
   --platform managed ^
   --project "%PROJECT_ID%" ^
   --set-env-vars COMPONENT_NAME=%ENV_COMPONENT_NAME%,EXPECTED_EVENT_TYPE=%ENV_EXPECTED_EVENT_TYPE%,OBJECT_PREFIX=%ENV_OBJECT_PREFIX%,OUTPUT_PREFIX=%ENV_OUTPUT_PREFIX%,GCE_ENV=true,GCP_PROJECT_ID=%PROJECT_ID%,GOOGLE_BUCKET=%BUCKET% ^
-  --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
   --vpc-connector "%CONNECTOR%" ^
   --vpc-egress=private-ranges-only
-
+REM --set-secrets DATABASE_URL=STAGING_DATABASE_URL:latest ^
 
 REM 6) Get service URL
 for /f "usebackq tokens=*" %%U in (`gcloud run services describe "%SERVICE%" --region "%REGION%" --project "%PROJECT_ID%" --format^=value^(status.url^)`) do set "SERVICE_URL=%%U"
