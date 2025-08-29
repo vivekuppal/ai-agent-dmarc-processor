@@ -140,7 +140,7 @@ class DMARCParser:
                                 type=AuthType.DKIM,
                                 domain=dkim_domain,
                                 selector=dkim_selector,
-                                result=AuthResult.PASS if spf_result == 'pass' else AuthResult.FAIL,
+                                result=AuthResult.PASS if dkim_result == 'pass' else AuthResult.FAIL,
                             ))
                     except Exception as e:
                         logger.error(f"Failed to store detail record: {str(e)}")
