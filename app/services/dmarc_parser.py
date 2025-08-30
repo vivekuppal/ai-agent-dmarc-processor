@@ -127,7 +127,7 @@ class DMARCParser:
                                 result=AuthResult.PASS if spf_result == 'pass' else AuthResult.FAIL,
                             ))
                             # print('parse_and_store - spf 2')
-                            await s.flush()  # populate dmarc_report.id
+                            # await s.flush()  # populate dmarc_report.id
                             # print('parse_and_store - spf 3')
 
                         # DKIM auth

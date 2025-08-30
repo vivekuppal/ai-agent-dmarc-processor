@@ -25,7 +25,7 @@ async def process_notification(*,
         file_path = context.get("filepath", "")
         print(f"Processing file: {file_path}")
         file_processor = FileProcessor.create(file_path, db=db)
-        print(f"File processor: {type(file_processor)}")
+        # print(f"File processor: {type(file_processor)}")
         # process
         result = await file_processor.process_file(content=content,
                                                    file_path=file_path)

@@ -206,10 +206,15 @@ class DmarcReportAuthDetail(Base):
     __tablename__ = 'dmarc_report_auth_details'
 
     id = Column(BigInteger, primary_key=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    modified_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True),
+                        server_default=func.now(), nullable=False)
+    modified_at = Column(DateTime(timezone=True),
+                         server_default=func.now(),
+                         onupdate=func.now(), nullable=False)
 
-    dmarc_report_id = Column(BigInteger, ForeignKey('dmarc_reports.id', ondelete='CASCADE'), nullable=False)
+    dmarc_report_id = Column(BigInteger, ForeignKey('dmarc_reports.id',
+                                                    ondelete='CASCADE'),
+                             nullable=False)
     type = Column(SQLEnum(AuthType, name="auth_type"), nullable=False)
     domain = Column(String(512))
     selector = Column(String(256))  # Required only when type == 'dkim'
