@@ -5,16 +5,18 @@ Event based processing of dmarc reports. Triggered by pub sub when a new report 
 # Running the app locally
 ```
 SET DATABASE_URL=
-SET GOOGLE_BUCKET=
-
-
+SET GOOGLE_BUCKET=<optional> # Not needed if testing locally
 ```
 
-Two ways to invoke the app locally
+Invoke the app locally
 ```
-python -m app.main
 uvicorn app.main:app --host 0.0.0.0 --port 8080
 ```
+
+To test<br/>
+Place a sample DMARC aggregate report in app/test_dmarc_sample.xml<br/>
+Invoke the URL - http://127.0.0.1:8080/local-test
+
 
 # Deploying the app on GCS
 

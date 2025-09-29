@@ -320,7 +320,11 @@ class FileProcessor(ABC):
             'netscape': 'Netscape',
             'thalesgroup': 'Thalesgroup',
             'aol': 'AOL',
-            'yandex': 'Yandex'
+            'yandex': 'Yandex',
+            'sbcglobal': 'SBC',
+            'att': 'ATT',
+            'verizon': 'Verizon',
+            'cloudflare': 'Cloudflare'
         }
         for key, source in mapping.items():
             if key in file_name_lower:

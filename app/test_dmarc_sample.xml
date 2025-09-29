@@ -41,6 +41,15 @@
         <result>pass</result>
         <selector>selector1</selector>
       </dkim>
+      <spf>
+        <domain>example2.com</domain>
+        <result>pass</result>
+      </spf>
+      <dkim>
+        <domain>example2.com</domain>
+        <result>pass</result>
+        <selector>selector2</selector>
+      </dkim>
     </auth_results>
   </record>
   <record>
