@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import List, NamedTuple
+from typing import Optional, Dict, List, NamedTuple
 from abc import ABC, abstractmethod
 import hashlib
 import xml.etree.ElementTree as ET
@@ -167,29 +167,51 @@ class XMLWellFormednessValidator(BaseValidator):
 
 
 class DMARCContentValidator(BaseValidator):
-    """Validate DMARC-specific content requirements"""
+    """Validate DMARC-specific content requirements (namespace-safe)."""
+
+    def _detect_ns(self, root: ET.Element) -> Dict[str, str]:
+        """
+        If the document uses a default namespace (e.g., urn:ietf:params:xml:ns:dmarc-2.0),
+        return {'d': '<ns-uri>'}. Otherwise return {}.
+        """
+        tag = root.tag or ""
+        if tag.startswith("{"):
+            uri = tag[1:].split("}", 1)[0]
+            return {"d": uri}
+        return {}
+
+    def _find_any(self, elem: ET.Element, local: str, ns: Dict[str, str]) -> Optional[ET.Element]:
+        """
+        Try to find an element named `local` under `elem` with and without namespace.
+        Works whether the doc is namespaced or not.
+        """
+        if ns:
+            hit = elem.find(f".//d:{local}", ns)
+            if hit is not None:
+                return hit
+        return elem.find(f".//{local}")
 
     def validate(self, content: bytes, file_path: str) -> ValidationResult:
-        """Validate DMARC-specific content"""
-        errors = []
-        warnings = []
+        errors: List[str] = []
+        warnings: List[str] = []
 
         try:
             root = ET.fromstring(content)
+            ns = self._detect_ns(root)
 
-            # Check for required DMARC elements
-            required_elements = ['report_metadata', 'policy_published', 'record']
+            # Required DMARC elements per aggregate schema
+            required_elements = ["report_metadata", "policy_published", "record"]
 
-            for element_name in required_elements:
-                if root.find(f".//{element_name}") is None:
-                    errors.append(f"Missing required DMARC element: {element_name}")
+            for name in required_elements:
+                if self._find_any(root, name, ns) is None:
+                    errors.append(f"Missing required DMARC element: {name}")
 
             # Check report metadata
-            report_metadata = root.find('.//report_metadata')
+            report_metadata = self._find_any(root, "report_metadata", ns)
             if report_metadata is not None:
-                if report_metadata.find('org_name') is None:
+                if self._find_any(report_metadata, "org_name", ns) is None:
                     warnings.append("Missing org_name in report_metadata")
-                if report_metadata.find('email') is None:
+                if self._find_any(report_metadata, "email", ns) is None:
                     warnings.append("Missing email in report_metadata")
 
             logger.debug(f"DMARC content validation completed for {file_path}")

@@ -16,6 +16,7 @@ from app.models import (
     AuthResult
 )
 from app.db import maybe_transaction
+from app.xml import dmarc
 
 
 logger = logging.getLogger(__name__)
@@ -164,115 +165,90 @@ class DMARCParser:
             return ''
 
     def _parse_xml_structure(self, xml_content: bytes) -> Optional[dict]:
-        """
-        1. Extract report metadata
-        2. Extract policy published
-        3. Extract records with authentication results
-        4. Handle different XML schema versions
-        """
         try:
-            root = ET.fromstring(xml_content)
+            root = dmarc.parse(xml_content)
+            ns = dmarc.detect_default_ns(root)
 
-            # Extract report metadata
-            report_metadata = root.find('report_metadata')
-            org_name = report_metadata.find('org_name').text if report_metadata.find('org_name') is not None else None
-            report_id = report_metadata.find('report_id').text if report_metadata.find('report_id') is not None else None
+            report_metadata = dmarc.find(root, "report_metadata", ns)
+            org_name = dmarc.text(dmarc.find(report_metadata, "org_name", ns))
+            report_id = dmarc.text(dmarc.find(report_metadata, "report_id", ns))
 
-            # Extract date range
-            date_range = report_metadata.find('date_range')
-            date_start = datetime.utcfromtimestamp(int(date_range.find('begin').text))
-            date_end = datetime.utcfromtimestamp(int(date_range.find('end').text))
+            date_range = dmarc.find(report_metadata, "date_range", ns)
+            date_start = datetime.utcfromtimestamp(int(dmarc.text(dmarc.find(date_range, "begin", ns)) or "0"))
+            date_end = datetime.utcfromtimestamp(int(dmarc.text(dmarc.find(date_range, "end", ns)) or "0"))
 
-            # Extract policy published
-            policy_published = root.find('policy_published')
-            policy_domain = policy_published.find('domain').text if policy_published.find('domain') is not None else None
-
-            # Optional policy fields
-            adkim = policy_published.find('adkim')
-            aspf = policy_published.find('aspf')
-            p = policy_published.find('p')
-            sp = policy_published.find('sp')
-            pct = policy_published.find('pct')
-            np = policy_published.find('np')
+            policy_published = dmarc.find(root, "policy_published", ns)
+            policy_domain = dmarc.text(dmarc.find(policy_published, "domain", ns))
 
             policy_data = {
-                'domain': policy_domain,
-                'adkim': adkim.text if adkim is not None else None,
-                'aspf': aspf.text if aspf is not None else None,
-                'p': p.text if p is not None else None,
-                'sp': sp.text if sp is not None else None,
-                'pct': int(pct.text) if pct is not None and pct.text else None,
-                'np': np.text if np is not None else None
+                "domain": policy_domain,
+                "adkim": dmarc.text(dmarc.find(policy_published, "adkim", ns)),
+                "aspf":  dmarc.text(dmarc.find(policy_published, "aspf", ns)),
+                "p":     dmarc.text(dmarc.find(policy_published, "p", ns)),
+                "sp":    dmarc.text(dmarc.find(policy_published, "sp", ns)),
+                "pct":   int(dmarc.text(dmarc.find(policy_published, "pct", ns)) or "0") or None,
+                "np":    dmarc.text(dmarc.find(policy_published, "np", ns)),
             }
 
             records = []
-            for record in root.findall('.//record'):
-                row = record.find('row')
-                identifiers = record.find('identifiers')
-                auth_results = record.find('auth_results')
+            for record in dmarc.findall(root, "record", ns):
+                row = dmarc.find(record, "row", ns)
+                identifiers = dmarc.find(record, "identifiers", ns)
+                auth_results = dmarc.find(record, "auth_results", ns)
 
-                # Extract basic record data
-                count = int(row.find('count').text)
-                source_ip = row.find('source_ip').text if row.find('source_ip') is not None else None
-                header_from = identifiers.find('header_from').text if identifiers.find('header_from') is not None else None
-                envelope_to = identifiers.find('envelope_to').text if identifiers.find('envelope_to') is not None else None
+                count = int(dmarc.text(dmarc.find(row, "count", ns)) or "0")
+                source_ip = dmarc.text(dmarc.find(row, "source_ip", ns))
+                header_from = dmarc.text(dmarc.find(identifiers, "header_from", ns))
+                envelope_to = dmarc.text(dmarc.find(identifiers, "envelope_to", ns))
 
-                # Extract policy evaluation
-                policy_eval = row.find('policy_evaluated')
-                disposition = policy_eval.find('disposition').text if policy_eval.find('disposition') is not None else None
-                dkim_result = policy_eval.find('dkim').text if policy_eval.find('dkim') is not None else None
-                spf_result = policy_eval.find('spf').text if policy_eval.find('spf') is not None else None
+                policy_eval = dmarc.find(row, "policy_evaluated", ns)
+                disposition = dmarc.text(dmarc.find(policy_eval, "disposition", ns))
+                dkim_result = dmarc.text(dmarc.find(policy_eval, "dkim", ns))
+                spf_result = dmarc.text(dmarc.find(policy_eval, "spf", ns))
 
-                # Collect ALL SPF auth results
                 spf_auth_results = []
-                for spf_auth in auth_results.findall('spf'):
+                for spf_auth in dmarc.findall(auth_results, "spf", ns):
                     spf_auth_results.append({
-                        "domain": spf_auth.findtext("domain"),
-                        "result": spf_auth.findtext("result") or "unknown",
+                        "domain": dmarc.text(dmarc.find(spf_auth, "domain", ns)),
+                        "result": dmarc.text(dmarc.find(spf_auth, "result", ns)) or "unknown",
                     })
 
-                # Collect ALL DKIM auth results
                 dkim_auth_results = []
-                for dkim_auth in auth_results.findall('dkim'):
+                for dkim_auth in dmarc.findall(auth_results, "dkim", ns):
                     dkim_auth_results.append({
-                        "domain": dkim_auth.findtext("domain"),
-                        "selector": dkim_auth.findtext("selector"),
-                        "result": dkim_auth.findtext("result") or "unknown",
+                        "domain":   dmarc.text(dmarc.find(dkim_auth, "domain", ns)),
+                        "selector": dmarc.text(dmarc.find(dkim_auth, "selector", ns)),
+                        "result":   dmarc.text(dmarc.find(dkim_auth, "result", ns)) or "unknown",
                     })
 
-                record_data = {
-                    'count': count,
-                    'source_ip': source_ip,
-                    'header_from': header_from,
-                    'envelope_to': envelope_to,
-                    'disposition': disposition,
-                    'dkim_result': dkim_result,
-                    'spf_result': spf_result,
-                    'spf_auth_results': spf_auth_results,
-                    'dkim_auth_results': dkim_auth_results,
-                }
+                records.append({
+                    "count": count,
+                    "source_ip": source_ip,
+                    "header_from": header_from,
+                    "envelope_to": envelope_to,
+                    "disposition": disposition,
+                    "dkim_result": dkim_result,
+                    "spf_result": spf_result,
+                    "spf_auth_results": spf_auth_results,
+                    "dkim_auth_results": dkim_auth_results,
+                })
 
-                records.append(record_data)
-
-            parsed_data = {
-                'report_metadata': {
-                    'org_name': org_name,
-                    'report_id': report_id,
-                    'date_start': date_start,
-                    'date_end': date_end
+            return {
+                "report_metadata": {
+                    "org_name": org_name,
+                    "report_id": report_id,
+                    "date_start": date_start,
+                    "date_end": date_end,
                 },
-                'policy_published': policy_data,
-                'records': records
+                "policy_published": policy_data,
+                "records": records,
             }
 
-            logger.info(f"Successfully parsed XML with {len(records)} records")
-            return parsed_data
-
         except ET.ParseError as e:
-            logger.error(f"XML parsing error: {str(e)}")
+            logger.error(f"XML parsing error: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error parsing XML: {str(e)}")
+            logger.error(f"Unexpected error parsing XML: {e}")
             return None
 
     def _extract_sender_info(self, domain: str) -> tuple:

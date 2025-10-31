@@ -10,10 +10,7 @@ set ENV_COMPONENT_NAME=%SERVICE%
 set ENV_EXPECTED_EVENT_TYPE=OBJECT_FINALIZE
 set ENV_OBJECT_PREFIX=reports/
 set ENV_OUTPUT_PREFIX=outputs/%SERVICE%/
-
-
 set PUSH_SA_NAME=pubsub-push-dmarc-processor-sa
-
 set PUSH_SA=%PUSH_SA_NAME%@%PROJECT_ID%.iam.gserviceaccount.com
 
 

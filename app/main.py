@@ -226,7 +226,8 @@ def list_all_bucket_files(db: AsyncSession = Depends(get_db)):
     try:
         from app.services.gcs_monitor import GCSFileProcessor
 
-        monitor = GCSFileProcessor(db)
+        monitor = GCSFileProcessor(db, bucket="lai-dmarc-reports",
+                                   file_path="reports/")
 
         # Get all files in bucket (not just XML)
         all_blobs = list(monitor.bucket.list_blobs())
