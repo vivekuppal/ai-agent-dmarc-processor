@@ -42,21 +42,33 @@ def _try_paths_all(elem: ET.Element, paths: Iterable[str], ns: Dict[str, str]) -
     return []
 
 
-def q(local: str) -> List[str]:
+# def q(local: str) -> List[str]:
+#     """
+#     Build candidate XPath fragments for one local name.
+#     Order matters: try namespaced first, then non-ns.
+#     Example: q("report_metadata") -> [".//d:report_metadata", ".//report_metadata"]
+#     """
+#     return [f".//d:{local}", f".//{local}"]
+
+
+def q(local: str, ns: Optional[Dict[str, str]]) -> List[str]:
     """
     Build candidate XPath fragments for one local name.
-    Order matters: try namespaced first, then non-ns.
-    Example: q("report_metadata") -> [".//d:report_metadata", ".//report_metadata"]
+    Only include the prefixed form if a prefix map is present.
     """
-    return [f".//d:{local}", f".//{local}"]
+    paths: List[str] = []
+    if ns and "d" in ns:
+        paths.append(f".//d:{local}")
+    paths.append(f".//{local}")
+    return paths
 
 
 def find(elem: ET.Element, local: str, ns: Dict[str, str]) -> Optional[ET.Element]:
-    return _try_paths(elem, q(local), ns)
+    return _try_paths(elem, q(local, ns), ns)
 
 
 def findall(elem: ET.Element, local: str, ns: Dict[str, str]) -> List[ET.Element]:
-    return _try_paths_all(elem, q(local), ns)
+    return _try_paths_all(elem, q(local, ns), ns)
 
 
 def text(elem: Optional[ET.Element]) -> Optional[str]:
