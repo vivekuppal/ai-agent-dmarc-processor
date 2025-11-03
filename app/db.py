@@ -7,8 +7,6 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     async_sessionmaker)
 from pydantic_settings import BaseSettings, SettingsConfigDict
-# from app.models import DMARCReport
-# from app.utils import get_database_url
 from app.utils import get_secret
 
 

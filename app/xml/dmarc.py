@@ -42,15 +42,6 @@ def _try_paths_all(elem: ET.Element, paths: Iterable[str], ns: Dict[str, str]) -
     return []
 
 
-# def q(local: str) -> List[str]:
-#     """
-#     Build candidate XPath fragments for one local name.
-#     Order matters: try namespaced first, then non-ns.
-#     Example: q("report_metadata") -> [".//d:report_metadata", ".//report_metadata"]
-#     """
-#     return [f".//d:{local}", f".//{local}"]
-
-
 def q(local: str, ns: Optional[Dict[str, str]]) -> List[str]:
     """
     Build candidate XPath fragments for one local name.

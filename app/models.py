@@ -219,14 +219,14 @@ class DmarcReportAuthDetail(Base):
     domain = Column(String(512))
     selector = Column(String(256))  # Required only when type == 'dkim'
     result = Column(SQLEnum(AuthResult, name="auth_result"), nullable=False)
+    count = Column(Integer, nullable=False, default=1)
 
     # Optional: define relationship if you have a DmarcReport model
     # dmarc_report = relationship("DmarcReport", back_populates="auth_details")
 
     def __repr__(self):
         return (
-            f"<DmarcReportAuthDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, "
-            f"type='{self.type}', domain='{self.domain}', result='{self.result}')>"
+            f"<DmarcReportAuthDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, type='{self.type}', domain='{self.domain}', result='{self.result}' count={self.count}>)"
         )
 
     def to_dict(self):
@@ -239,5 +239,6 @@ class DmarcReportAuthDetail(Base):
             'type': self.type,
             'domain': self.domain,
             'selector': self.selector,
-            'result': self.result
+            'result': self.result,
+            'count': self.count
         }

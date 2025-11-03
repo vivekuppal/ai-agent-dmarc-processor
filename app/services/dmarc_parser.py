@@ -122,6 +122,7 @@ class DMARCParser:
                                 type=AuthType.SPF,
                                 domain=spf_auth.get("domain"),
                                 result=AuthResult.PASS if (spf_auth.get("result") or "").lower() == "pass" else AuthResult.FAIL,
+                                count=record_data.get('count', 1),
                             ))
 
                         # Store ALL DKIM results
@@ -132,6 +133,7 @@ class DMARCParser:
                                 domain=dkim_auth.get("domain"),
                                 selector=dkim_auth.get("selector"),
                                 result=AuthResult.PASS if (dkim_auth.get("result") or "").lower() == "pass" else AuthResult.FAIL,
+                                count=record_data.get('count', 1),
                             ))
 
                     except Exception as e:
