@@ -1,3 +1,4 @@
+# app/services/dmarc_parser.py
 import logging
 from datetime import datetime
 import socket
@@ -21,12 +22,77 @@ from app.xml import dmarc
 
 logger = logging.getLogger(__name__)
 
+# These are used to help identify known forwarders
+KNOWN_FORWARDER_DOMAINS = {
+    # common forwarders / gateways / list hosts / relays
+    "mailspamprotection.com", "mimecast.com", "proofpoint.com", "ppe-hosted.com",
+    "outlook.com", "protection.outlook.com", "google.com", "sendgrid.net",
+    "amazonses.com", "sparkpostmail.com", "icloud.com", "yahoo.com",
+    "pphosted.com", "secureserver.net", "sendinblue.com", "mailgun.org",
+}
+
 
 class DMARCParser:
     """Parse DMARC XML reports and store data in database"""
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    @staticmethod
+    def _relaxed_aligned(dkim_domain: Optional[str], header_from: Optional[str]) -> bool:
+        """
+        Approximate DMARC 'relaxed' alignment for DKIM:
+        passing if DKIM d= is the same as or a parent of header_from.
+        (No PSL here; use a simple suffix test as a heuristic.)
+        """
+        if not dkim_domain or not header_from:
+            return False
+        d = dkim_domain.lower().strip()
+        h = header_from.lower().strip()
+        return h == d or h.endswith("." + d) or d.endswith("." + h)
+
+    @staticmethod
+    def _contains_known_forwarder(dkim_auth_results: list) -> bool:
+        for item in dkim_auth_results or []:
+            dom = (item.get("domain") or "").lower()
+            if any(dom.endswith(k) for k in KNOWN_FORWARDER_DOMAINS):
+                if (item.get("result") or "").lower() == "pass":
+                    return True
+        return False
+
+    def _classify_record(self, record_data: dict) -> Optional[str]:
+        """
+        Return a short classification string (e.g., 'forwarded') or None.
+
+        Heuristic for forwarding/relaying:
+          - policy SPF = fail
+          - policy DKIM = pass
+          - AND (a DKIM signature looks aligned with header_from  OR a known forwarder signed it)
+        """
+        try:
+            spf_policy = (record_data.get("spf_result") or "").lower()
+            dkim_policy = (record_data.get("dkim_result") or "").lower()
+            header_from = (record_data.get("header_from") or "").lower()
+            dkim_auth = record_data.get("dkim_auth_results") or []
+
+            if spf_policy == "fail" and dkim_policy == "pass":
+                # (A) aligned DKIM d= with header_from?
+                aligned_pass = any(
+                    self._relaxed_aligned((item.get("domain") or ""), header_from) and
+                    (item.get("result") or "").lower() == "pass"
+                    for item in dkim_auth
+                )
+
+                # (B) or signed by a known forwarder/gateway?
+                known_forwarder = self._contains_known_forwarder(dkim_auth)
+
+                if aligned_pass or known_forwarder:
+                    return "forwarded"
+
+            return None
+        except Exception as e:
+            logger.warning(f"Classification failed for record: {e}")
+            return None
 
     async def lookup_customer_id(self, policy_domain: str) -> Optional[int]:
         """
@@ -111,6 +177,7 @@ class DMARCParser:
                             hostname=hostname,  # may be refined via rDNS later
                             from_domain=record_data.get('header_from'),
                             to_domain=record_data.get('envelope_to'),
+                            classification=self._classify_record(record_data),
                         )
                         s.add(detail)
                         details_stored += 1

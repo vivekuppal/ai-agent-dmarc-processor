@@ -142,6 +142,7 @@ class DMARCReportDetail(Base):
     source_ip = Column(String(45), nullable=True)  # IPv4 (15) or IPv6 (39) + buffer
     hostname = Column(String(255), nullable=True)  # Hostname for the IP
     from_domain = Column(String(255), nullable=True)  # header_from domain
+    classification = Column(String(64), nullable=True)  # classification e.g. based on known forwarders
     to_domain = Column(String(255), nullable=True)  # envelope_to domain
 
     # Relationship back to parent report
@@ -163,6 +164,7 @@ class DMARCReportDetail(Base):
             'source_ip': self.source_ip,
             'hostname': self.hostname,
             'from_domain': self.from_domain,
+            'classification': self.classification,
             'to_domain': self.to_domain
         }
 
