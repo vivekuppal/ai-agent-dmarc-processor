@@ -46,6 +46,42 @@ class AuthType(enum.Enum):
 class AuthResult(enum.Enum):
     PASS = "pass"
     FAIL = "fail"
+    SOFTFAIL = "softfail"
+    NEUTRAL = "neutral"
+    NONE = "none"
+    TEMPERROR = "temperror"
+    PERMERROR = "permerror"
+    POLICY = "policy"
+
+    @classmethod
+    def from_str(cls, value: str) -> "AuthResult":
+        """
+        Normalize any SPF/DKIM result string to AuthResult.
+        Accepts mixed case and common variants (underscores, hyphens, spaces).
+        Falls back to NONE for unknowns.
+        """
+        if not value:
+            return cls.NONE
+        k = value.strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+        # canonical map (all keys already normalized as above)
+        mapping = {
+            "pass": cls.PASS,
+            "fail": cls.FAIL,
+            "softfail": cls.SOFTFAIL,
+            "neutral": cls.NEUTRAL,
+            "none": cls.NONE,
+            "temperror": cls.TEMPERROR,
+            "temperr": cls.TEMPERROR,
+            "temporaryerror": cls.TEMPERROR,
+            "permerror": cls.PERMERROR,
+            "permerr": cls.PERMERROR,
+            "permanenterror": cls.PERMERROR,
+            "policy": cls.POLICY,
+            # common oddballs → reasonable defaults
+            "unknown": cls.NONE,
+        }
+        return mapping.get(k, cls.NONE)
 
 
 class Domain(Base):
@@ -203,44 +239,61 @@ class ProcessedFile(Base):
         }
 
 
+# ensure your AuthType also has lowercase .value (e.g., "spf", "dkim")
 class DmarcReportAuthDetail(Base):
-    """Model for storing DKIM/SPF auth results linked to a DMARC report"""
     __tablename__ = 'dmarc_report_auth_details'
 
     id = Column(BigInteger, primary_key=True)
-    created_at = Column(DateTime(timezone=True),
-                        server_default=func.now(), nullable=False)
-    modified_at = Column(DateTime(timezone=True),
-                         server_default=func.now(),
-                         onupdate=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modified_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
-    dmarc_report_id = Column(BigInteger, ForeignKey('dmarc_reports.id',
-                                                    ondelete='CASCADE'),
-                             nullable=False)
-    type = Column(SQLEnum(AuthType, name="auth_type"), nullable=False)
+    dmarc_report_id = Column(BigInteger, ForeignKey('dmarc_reports.id', ondelete='CASCADE'), nullable=False)
+
+    # Tell SQLAlchemy to use enum.value (not enum.name)
+    type = Column(
+        SQLEnum(
+            AuthType,
+            name="auth_type",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+            native_enum=True,          # default on PG, but explicit is fine
+            validate_strings=True
+        ),
+        nullable=False
+    )
+
     domain = Column(String(512))
-    selector = Column(String(256))  # Required only when type == 'dkim'
-    result = Column(SQLEnum(AuthResult, name="auth_result"), nullable=False)
-    count = Column(Integer, nullable=False, default=1)
+    selector = Column(String(256))
 
-    # Optional: define relationship if you have a DmarcReport model
-    # dmarc_report = relationship("DmarcReport", back_populates="auth_details")
+    result = Column(
+        SQLEnum(
+            AuthResult,
+            name="auth_result",
+            values_callable=lambda enum_cls: [e.value for e in enum_cls],
+            native_enum=True,
+            validate_strings=True
+        ),
+        nullable=False
+    )
+
+    count = Column(Integer, nullable=False, default=1)
 
     def __repr__(self):
         return (
-            f"<DmarcReportAuthDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, type='{self.type}', domain='{self.domain}', result='{self.result}' count={self.count}>)"
+            f"<DmarcReportAuthDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, "
+            f"type='{self.type}', domain='{self.domain}', result='{self.result}', count={self.count})>"
         )
 
     def to_dict(self):
-        """Convert model to dictionary"""
         return {
             'id': self.id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'modified_at': self.modified_at.isoformat() if self.modified_at else None,
             'dmarc_report_id': self.dmarc_report_id,
-            'type': self.type,
+            # use .value so you get 'spf'/'dkim' not AuthType.SPF, and 'pass' etc.
+            'type': self.type.value if self.type else None,
             'domain': self.domain,
             'selector': self.selector,
-            'result': self.result,
+            'result': self.result.value if self.result else None,
             'count': self.count
         }
+

@@ -188,7 +188,7 @@ class DMARCParser:
                                 dmarc_report_id=dmarc_report.id,
                                 type=AuthType.SPF,
                                 domain=spf_auth.get("domain"),
-                                result=AuthResult.PASS if (spf_auth.get("result") or "").lower() == "pass" else AuthResult.FAIL,
+                                result=AuthResult.from_str(spf_auth.get("result")),
                                 count=record_data.get('count', 1),
                             ))
 
@@ -199,7 +199,7 @@ class DMARCParser:
                                 type=AuthType.DKIM,
                                 domain=dkim_auth.get("domain"),
                                 selector=dkim_auth.get("selector"),
-                                result=AuthResult.PASS if (dkim_auth.get("result") or "").lower() == "pass" else AuthResult.FAIL,
+                                result=AuthResult.from_str(dkim_auth.get("result")),
                                 count=record_data.get('count', 1),
                             ))
 
@@ -279,7 +279,7 @@ class DMARCParser:
                 for spf_auth in dmarc.findall(auth_results, "spf", ns):
                     spf_auth_results.append({
                         "domain": dmarc.text(dmarc.find(spf_auth, "domain", ns)),
-                        "result": dmarc.text(dmarc.find(spf_auth, "result", ns)) or "unknown",
+                        "result": dmarc.text(dmarc.find(spf_auth, "result", ns)) or "none",
                     })
 
                 dkim_auth_results = []
@@ -287,7 +287,7 @@ class DMARCParser:
                     dkim_auth_results.append({
                         "domain":   dmarc.text(dmarc.find(dkim_auth, "domain", ns)),
                         "selector": dmarc.text(dmarc.find(dkim_auth, "selector", ns)),
-                        "result":   dmarc.text(dmarc.find(dkim_auth, "result", ns)) or "unknown",
+                        "result":   dmarc.text(dmarc.find(dkim_auth, "result", ns)) or "none",
                     })
 
                 records.append({
