@@ -180,9 +180,12 @@ class DMARCReportDetail(Base):
     from_domain = Column(String(255), nullable=True)  # header_from domain
     classification = Column(String(64), nullable=True)  # classification e.g. based on known forwarders
     to_domain = Column(String(255), nullable=True)  # envelope_to domain
-    auth_details = relationship("DmarcReportAuthDetail",back_populates="detail")
+    disposition = Column(String(50), nullable=True)
+    dkim = Column(String(50), nullable=True)
+    spf = Column(String(50), nullable=True)
 
-    # Relationship back to parent report
+    # Relationships
+    auth_details = relationship("DmarcReportAuthDetail", back_populates="detail")
     report = relationship("DMARCReport", back_populates="details")
 
     def __repr__(self):
@@ -206,7 +209,10 @@ class DMARCReportDetail(Base):
             'hostname': self.hostname,
             'from_domain': self.from_domain,
             'classification': self.classification,
-            'to_domain': self.to_domain
+            'to_domain': self.to_domain,
+            'disposition': self.disposition,
+            'dkim': self.dkim,
+            'spf': self.spf,
         }
 
 

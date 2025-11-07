@@ -179,6 +179,9 @@ class DMARCParser:
                             from_domain=record_data.get('header_from'),
                             to_domain=record_data.get('envelope_to'),
                             classification=self._classify_record(record_data),
+                            disposition=record_data.get('disposition'),
+                            dkim=record_data.get('dkim_result'),
+                            spf=record_data.get('spf_result'),
                         )
                         s.add(detail)
                         # IMPORTANT: flush so detail.id is available for FK on auth rows
