@@ -167,12 +167,13 @@ class DMARCParser:
                     try:
                         email_status, email_status_reason = self._determine_email_status(record_data)
                         hostname = self.get_hostname(record_data.get('source_ip', ''))
+                        msg_count = record_data.get('count', 1)
 
                         detail = DMARCReportDetail(
                             dmarc_report_id=dmarc_report.id,
                             email_status=email_status,
                             email_status_reason=email_status_reason,
-                            email_count=record_data.get('count', 1),
+                            email_count=msg_count,
                             source_ip=record_data.get('source_ip'),
                             hostname=hostname,  # may be refined via rDNS later
                             from_domain=record_data.get('header_from'),
@@ -180,27 +181,35 @@ class DMARCParser:
                             classification=self._classify_record(record_data),
                         )
                         s.add(detail)
+                        # IMPORTANT: flush so detail.id is available for FK on auth rows
+                        await s.flush()
                         details_stored += 1
 
-                        # Store ALL SPF results
+                        # Cache for FK
+                        detail_id = detail.id
+                        print(f"Adding the Auth detail column. Detail ID: {detail_id}")
+
+                        # Store ALL SPF results, linking to the detail
                         for spf_auth in record_data.get("spf_auth_results", []):
                             s.add(DmarcReportAuthDetail(
                                 dmarc_report_id=dmarc_report.id,
+                                dmarc_report_detail_id=detail_id,
                                 type=AuthType.SPF,
                                 domain=spf_auth.get("domain"),
                                 result=AuthResult.from_str(spf_auth.get("result")),
-                                count=record_data.get('count', 1),
+                                count=msg_count,
                             ))
 
-                        # Store ALL DKIM results
+                        # Store ALL DKIM results, linking to the detail
                         for dkim_auth in record_data.get("dkim_auth_results", []):
                             s.add(DmarcReportAuthDetail(
                                 dmarc_report_id=dmarc_report.id,
+                                dmarc_report_detail_id=detail_id,
                                 type=AuthType.DKIM,
                                 domain=dkim_auth.get("domain"),
                                 selector=dkim_auth.get("selector"),
                                 result=AuthResult.from_str(dkim_auth.get("result")),
-                                count=record_data.get('count', 1),
+                                count=msg_count,
                             ))
 
                     except Exception as e:

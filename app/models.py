@@ -180,12 +180,17 @@ class DMARCReportDetail(Base):
     from_domain = Column(String(255), nullable=True)  # header_from domain
     classification = Column(String(64), nullable=True)  # classification e.g. based on known forwarders
     to_domain = Column(String(255), nullable=True)  # envelope_to domain
+    auth_details = relationship("DmarcReportAuthDetail",back_populates="detail")
 
     # Relationship back to parent report
     report = relationship("DMARCReport", back_populates="details")
 
     def __repr__(self):
-        return f"<DMARCReportDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, email_status='{self.email_status}', email_count={self.email_count})>"
+        """String representation of the model"""
+        return (
+            f"<DMARCReportDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, "
+            f"email_status='{self.email_status}', email_count={self.email_count})>"
+        )
 
     def to_dict(self):
         """Convert model to dictionary"""
@@ -239,31 +244,47 @@ class ProcessedFile(Base):
         }
 
 
-# ensure your AuthType also has lowercase .value (e.g., "spf", "dkim")
 class DmarcReportAuthDetail(Base):
     __tablename__ = 'dmarc_report_auth_details'
 
-    id = Column(BigInteger, primary_key=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    modified_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    dmarc_report_id = Column(BigInteger, ForeignKey('dmarc_reports.id', ondelete='CASCADE'), nullable=False)
-
-    # Tell SQLAlchemy to use enum.value (not enum.name)
+    id = Column(
+        BigInteger,
+        primary_key=True
+    )
+    created_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+    modified_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
+    dmarc_report_id = Column(
+        BigInteger,
+        ForeignKey('dmarc_reports.id', ondelete='CASCADE'),
+        nullable=False
+    )
+    dmarc_report_detail_id = Column(
+        Integer,
+        ForeignKey('dmarc_report_details.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True
+    )
     type = Column(
         SQLEnum(
             AuthType,
             name="auth_type",
             values_callable=lambda enum_cls: [e.value for e in enum_cls],
-            native_enum=True,          # default on PG, but explicit is fine
+            native_enum=True,
             validate_strings=True
         ),
         nullable=False
     )
-
     domain = Column(String(512))
     selector = Column(String(256))
-
     result = Column(
         SQLEnum(
             AuthResult,
@@ -274,26 +295,34 @@ class DmarcReportAuthDetail(Base):
         ),
         nullable=False
     )
-
     count = Column(Integer, nullable=False, default=1)
 
+    # Relationship to the detail row
+    detail = relationship(
+        "DMARCReportDetail",
+        back_populates="auth_details",
+        passive_deletes=True
+    )
+
     def __repr__(self):
+        """String representation of the model"""
         return (
             f"<DmarcReportAuthDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, "
+            f"dmarc_report_detail_id={self.dmarc_report_detail_id}, "
             f"type='{self.type}', domain='{self.domain}', result='{self.result}', count={self.count})>"
         )
 
     def to_dict(self):
+        """Convert model to dictionary"""
         return {
             'id': self.id,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'modified_at': self.modified_at.isoformat() if self.modified_at else None,
             'dmarc_report_id': self.dmarc_report_id,
-            # use .value so you get 'spf'/'dkim' not AuthType.SPF, and 'pass' etc.
+            'dmarc_report_detail_id': self.dmarc_report_detail_id,
             'type': self.type.value if self.type else None,
             'domain': self.domain,
             'selector': self.selector,
             'result': self.result.value if self.result else None,
             'count': self.count
         }
-
