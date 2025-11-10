@@ -12,7 +12,7 @@ set ENV_OBJECT_PREFIX=reports/
 set ENV_OUTPUT_PREFIX=outputs/%SERVICE%/
 set PUSH_SA_NAME=pubsub-push-dmarc-processor-sa
 set PUSH_SA=%PUSH_SA_NAME%@%PROJECT_ID%.iam.gserviceaccount.com
-
+set CONNECTOR=lai-vpc-connector
 
 
 for /f %%I in ('powershell -NoProfile -Command "(Get-Date).ToString('yyyyMMdd-HHmmss')"') do set "TS=%%I"

@@ -8,10 +8,12 @@ from sqlalchemy import (
     Text,
     Enum as SQLEnum,
     ForeignKey,
-    func
+    func,
+    text
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.dialects.postgresql import UUID
 
 # Create base class for models
 Base = declarative_base()
@@ -102,6 +104,7 @@ class Domain(Base):
     # Note: Relationship to DMARC reports handled manually via customer_id lookup
 
     def __repr__(self):
+        """String representation of the model"""
         return f"<Domain(id={self.id}, domain='{self.domain}', customer_id={self.customer_id})>"
 
     def to_dict(self):
@@ -138,8 +141,10 @@ class DMARCReport(Base):
 
     # Relationships
     details = relationship("DMARCReportDetail", back_populates="report", cascade="all, delete-orphan")
+    alerts = relationship("Alert", back_populates="dmarc_report")
 
     def __repr__(self):
+        """String representation of the model"""
         return f"<DMARCReport(id={self.id}, policy_domain='{self.policy_domain}', report_id='{self.report_id}')>"
 
     def to_dict(self):
@@ -331,4 +336,55 @@ class DmarcReportAuthDetail(Base):
             'selector': self.selector,
             'result': self.result.value if self.result else None,
             'count': self.count
+        }
+
+
+class Alert(Base):
+    """Model for storing generated alerts related to DMARC reports."""
+    __tablename__ = "alerts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    modified_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+    type = Column(String(128), nullable=False)
+
+    # Foreign keys to related tables
+    dmarc_report_id = Column(
+        ForeignKey("dmarc_reports.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    dmarc_report_detail_id = Column(
+        ForeignKey("dmarc_report_details.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    priority = Column(String(24), nullable=False, default="low", server_default="low")
+    severity = Column(String(24), nullable=False, default="low", server_default="low")
+    status = Column(String(24), nullable=True)
+
+    # Relationships (optional, but aligns with other models)
+    dmarc_report = relationship("DMARCReport", back_populates="alerts", foreign_keys=[dmarc_report_id])
+    dmarc_report_detail = relationship("DMARCReportDetail", foreign_keys=[dmarc_report_detail_id])
+
+    def __repr__(self):
+        """String representation for debugging/logging."""
+        return (
+            f"<Alert(id={self.id}, type='{self.type}', "
+            f"priority='{self.priority}', severity='{self.severity}', status='{self.status}')>"
+        )
+
+    def to_dict(self):
+        """Convert model instance to a serializable dictionary."""
+        return {
+            "id": str(self.id),
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "modified_at": self.modified_at.isoformat() if self.modified_at else None,
+            "type": self.type,
+            "dmarc_report_id": self.dmarc_report_id,
+            "dmarc_report_detail_id": self.dmarc_report_detail_id,
+            "priority": self.priority,
+            "severity": self.severity,
+            "status": self.status,
         }

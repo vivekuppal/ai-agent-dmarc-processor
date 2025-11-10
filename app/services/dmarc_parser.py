@@ -120,7 +120,8 @@ class DMARCParser:
             if self.db.in_transaction():
                 await self.db.rollback()
 
-    async def parse_and_store(self, xml_content: bytes, file_path: str, report_source: str) -> int:
+    async def parse_and_store(self, xml_content: bytes,
+                              file_path: str, report_source: str) -> int:
         """
         Parse DMARC XML content and store in database.
         Returns dmarc_report_id if successful, 0 if failed.
@@ -137,6 +138,18 @@ class DMARCParser:
             # 2) Lookup customer for policy domain
             policy_domain = parsed_data['policy_published']['domain']
             customer_id: Optional[int] = await self.lookup_customer_id(policy_domain)
+
+            # check if DMARC Processing is enabled for this customer
+            if customer_id:
+                from feature_utils import is_feature_enabled_for_customer
+                feature_enabled = await is_feature_enabled_for_customer(
+                    session=self.db,
+                    customer_id=customer_id,
+                    feature_key='DMARC_REPORT_PROCESSING'
+                )
+                if not feature_enabled:
+                    logger.info(f"DMARC report processing disabled for customer {customer_id}. Skipping report.")
+                    return 0
 
             # 3) Build main report row
             dmarc_report = DMARCReport(
@@ -190,7 +203,7 @@ class DMARCParser:
 
                         # Cache for FK
                         detail_id = detail.id
-                        print(f"Adding the Auth detail column. Detail ID: {detail_id}")
+                        # print(f"Adding the Auth detail column. Detail ID: {detail_id}")
 
                         # Store ALL SPF results, linking to the detail
                         for spf_auth in record_data.get("spf_auth_results", []):
