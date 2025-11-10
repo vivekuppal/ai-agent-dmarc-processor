@@ -179,7 +179,3 @@ class CustomerFeatureFlags(Base):
             'sub_feature_id': self.sub_feature_id,
             'enabled': bool(self.enabled),
         }
-
-
-
-
