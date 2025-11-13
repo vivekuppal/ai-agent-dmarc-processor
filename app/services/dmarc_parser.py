@@ -18,7 +18,7 @@ from app.models import (
 )
 from app.db import maybe_transaction
 from app.xml import dmarc
-
+from app.feature_utils import is_feature_enabled_for_customer
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,6 @@ class DMARCParser:
 
             # check if DMARC Processing is enabled for this customer
             if customer_id:
-                from feature_utils import is_feature_enabled_for_customer
                 feature_enabled = await is_feature_enabled_for_customer(
                     session=self.db,
                     customer_id=customer_id,
@@ -150,7 +149,8 @@ class DMARCParser:
                 if not feature_enabled:
                     logger.info(f"DMARC report processing disabled for customer {customer_id}. Skipping report.")
                     return 0
-
+            # print(f"report_start_date: {parsed_data['report_metadata']['date_start']}")
+            # print(f"report_end_date: {parsed_data['report_metadata']['date_end']}")
             # 3) Build main report row
             dmarc_report = DMARCReport(
                 report_source=parsed_data['report_metadata']['org_name'],

@@ -29,6 +29,9 @@ async def process_notification(*,
         # process
         result = await file_processor.process_file(content=content,
                                                    file_path=file_path)
+        if db.in_transaction():
+            await db.commit()
+
         return {
             'status': result,
             'message': 'Notification successfully processed'

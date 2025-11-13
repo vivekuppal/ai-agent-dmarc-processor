@@ -1,7 +1,7 @@
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from model_features import FeatureCatalog, SubfeatureCatalog, CustomerFeatureFlags
+from app.model_features import FeatureCatalog, SubfeatureCatalog, CustomerFeatureFlags
 
 
 async def is_feature_enabled_for_customer(

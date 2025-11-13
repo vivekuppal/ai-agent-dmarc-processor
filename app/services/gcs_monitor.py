@@ -427,6 +427,9 @@ class LocalFileProcessor(FileProcessor):
             # Mark processing as complete
             await self.complete_file_processing(processing_id, dmarc_report_id)
 
+            if self.db.in_transaction():
+                await self.db.commit()
+
             return True
 
         except Exception as e:
@@ -678,6 +681,9 @@ class GCSFileProcessor(FileProcessor):
             # as input by the spoofing ai agent
             self.copy_file_to(file_blob, "spoofing/")
 
+            if self.db.in_transaction():
+                await self.db.commit()
+
             # Move file to processed folder
             if self.move_file_to_processed(file_blob):
                 logger.info(f"Successfully processed and moved file: {file_path} (dmarc_report_id: {dmarc_report_id})")
@@ -730,6 +736,9 @@ class GCSFileProcessor(FileProcessor):
                 except Exception as e:
                     logger.error(f"Unexpected error processing file {blob.name}: {str(e)}")
                     failed_count += 1
+
+            if self.db.in_transaction():
+                await self.db.commit()
 
             logger.info(f"GCS monitoring cycle complete. Processed: {processed_count}, Failed: {failed_count}")
 
