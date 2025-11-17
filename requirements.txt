@@ -8,3 +8,4 @@ SqlAlchemy==2.0.42
 asyncpg==0.30.0
 pydantic-settings==2.10.1
 lxml==6.0.1
+tldextract==5.3.0

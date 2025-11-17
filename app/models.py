@@ -188,6 +188,7 @@ class DMARCReportDetail(Base):
     disposition = Column(String(50), nullable=True)
     dkim = Column(String(50), nullable=True)
     spf = Column(String(50), nullable=True)
+    email_source = Column(String(128), nullable=True)  # Optional field for email source/provider
 
     # Relationships
     auth_details = relationship("DmarcReportAuthDetail", back_populates="detail")
@@ -218,6 +219,7 @@ class DMARCReportDetail(Base):
             'disposition': self.disposition,
             'dkim': self.dkim,
             'spf': self.spf,
+            'email_source': self.email_source,
         }
 
 

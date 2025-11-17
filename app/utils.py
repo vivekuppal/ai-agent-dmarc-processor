@@ -4,7 +4,8 @@ import os
 from functools import lru_cache
 from typing import Optional, Callable, Any
 import hashlib
-
+import socket
+import ipaddress
 from fastapi import Request
 from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token
@@ -175,6 +176,35 @@ def get_database_url() -> str:
 def calculate_file_hash(content: bytes) -> str:
     """Calculate SHA256 hash of file content"""
     return hashlib.sha256(content).hexdigest()
+
+
+def ip_to_hostname(ip: str, timeout: float = 3.0) -> Optional[str]:
+    """
+    Convert an IPv4 or IPv6 address to a hostname using reverse DNS.
+
+    Returns:
+        - hostname (str) if one is found
+        - None if no hostname exists or lookup fails
+    """
+    # Validate IP first (ensures it's a real IPv4/IPv6 string)
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        raise ValueError(f"Invalid IP address: {ip!r}")
+
+    # Set a timeout for the lookup
+    original_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(timeout)
+
+    try:
+        host, aliases, _ = socket.gethostbyaddr(ip)
+        return host
+    except (socket.herror, socket.gaierror, TimeoutError):
+        # No PTR record, cannot resolve, or DNS/timeout error
+        return None
+    finally:
+        # Restore previous default timeout
+        socket.setdefaulttimeout(original_timeout)
 
 
 # -----------------------

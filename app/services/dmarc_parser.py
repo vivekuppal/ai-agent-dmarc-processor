@@ -19,6 +19,9 @@ from app.models import (
 from app.db import maybe_transaction
 from app.xml import dmarc
 from app.feature_utils import is_feature_enabled_for_customer
+from app.utils import ip_to_hostname
+from app.email_utils import get_email_source
+
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +183,7 @@ class DMARCParser:
                     try:
                         email_status, email_status_reason = self._determine_email_status(record_data)
                         hostname = self.get_hostname(record_data.get('source_ip', ''))
+                        email_source = get_email_source(hostname)
                         msg_count = record_data.get('count', 1)
 
                         detail = DMARCReportDetail(
@@ -188,13 +192,14 @@ class DMARCParser:
                             email_status_reason=email_status_reason,
                             email_count=msg_count,
                             source_ip=record_data.get('source_ip'),
-                            hostname=hostname,  # may be refined via rDNS later
+                            hostname=hostname,
                             from_domain=record_data.get('header_from'),
                             to_domain=record_data.get('envelope_to'),
                             classification=self._classify_record(record_data),
                             disposition=record_data.get('disposition'),
                             dkim=record_data.get('dkim_result'),
                             spf=record_data.get('spf_result'),
+                            email_source=email_source
                         )
                         s.add(detail)
                         # IMPORTANT: flush so detail.id is available for FK on auth rows
@@ -295,6 +300,8 @@ class DMARCParser:
                 header_from = dmarc.text(dmarc.find(identifiers, "header_from", ns))
                 envelope_to = dmarc.text(dmarc.find(identifiers, "envelope_to", ns))
 
+                source_address = ip_to_hostname(source_ip)
+
                 policy_eval = dmarc.find(row, "policy_evaluated", ns)
                 disposition = dmarc.text(dmarc.find(policy_eval, "disposition", ns))
                 dkim_result = dmarc.text(dmarc.find(policy_eval, "dkim", ns))
@@ -318,6 +325,7 @@ class DMARCParser:
                 records.append({
                     "count": count,
                     "source_ip": source_ip,
+                    "source_address": source_address,
                     "header_from": header_from,
                     "envelope_to": envelope_to,
                     "disposition": disposition,
