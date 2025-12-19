@@ -176,9 +176,17 @@ class DMARCReportDetail(Base):
     id = Column(Integer, primary_key=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     modified_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
     dmarc_report_id = Column(Integer, ForeignKey('dmarc_reports.id'), nullable=False, index=True)
+
     email_status = Column(SQLEnum(EmailStatus), nullable=False, index=True)
     email_status_reason = Column(SQLEnum(EmailStatusReason), nullable=False)
+
+    email_status_actual = Column(SQLEnum(EmailStatus), nullable=True, index=True)
+    email_reason_actual = Column(SQLEnum(EmailStatusReason), nullable=True)
+    reason_type = Column(String(50), nullable=True)
+    reason_comment = Column(String(512), nullable=True)
+
     email_count = Column(Integer, nullable=False, default=0)
     source_ip = Column(String(45), nullable=True)  # IPv4 (15) or IPv6 (39) + buffer
     hostname = Column(String(255), nullable=True)  # Hostname for the IP
@@ -198,7 +206,9 @@ class DMARCReportDetail(Base):
         """String representation of the model"""
         return (
             f"<DMARCReportDetail(id={self.id}, dmarc_report_id={self.dmarc_report_id}, "
-            f"email_status='{self.email_status}', email_count={self.email_count})>"
+            f"email_status='{self.email_status}', email_count={self.email_count})"
+            f"email_status_actual='{self.email_status_actual}', "
+            f"email_count={self.email_count})>"
         )
 
     def to_dict(self):
@@ -208,8 +218,18 @@ class DMARCReportDetail(Base):
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'modified_at': self.modified_at.isoformat() if self.modified_at else None,
             'dmarc_report_id': self.dmarc_report_id,
+
             'email_status': self.email_status.value if self.email_status else None,
             'email_status_reason': self.email_status_reason.value if self.email_status_reason else None,
+
+            'email_status_actual': (
+                self.email_status_actual.value if self.email_status_actual else None
+            ),
+            'email_reason_actual': (
+                self.email_reason_actual.value if self.email_reason_actual else None
+            ),
+            'reason_type': self.reason_type,
+            'reason_comment': self.reason_comment,
             'email_count': self.email_count,
             'source_ip': self.source_ip,
             'hostname': self.hostname,

@@ -9,6 +9,7 @@ PROVIDER_BY_BASE_DOMAIN = {
     "live.com": "Microsoft",
     "hotmail.com": "Microsoft",
     "yahoo.com": "Yahoo",
+    "apple.com": "Apple",
     "icloud.com": "Apple",
     "me.com": "Apple",
     "mac.com": "Apple",
@@ -21,9 +22,11 @@ PROVIDER_BY_BASE_DOMAIN = {
     "amazonses.com": "Amazon SES",
     "sendgrid.net": "SendGrid",
     "mailgun.org": "Mailgun",
+    "mailgun.net": "Mailgun",
     "sparkpostmail.com": "SparkPost",
     "mcsv.net": "Mailchimp",
     "secureserver.net": "GoDaddy",
+    "onsecureserver.net": "GoDaddy",
     "inkyphishfence.com": "Inky Phish Fence",
     "perception-point.io": "Perception Point",
     "improvmx.com": "ImprovMx Email forwarding",
@@ -32,6 +35,10 @@ PROVIDER_BY_BASE_DOMAIN = {
     "forwardemail.net": "Forward Email",
     "iphmx.com": "Cisco Secure Email",
     "zendoff.com": "Zendoff Customer MTA",
+    "dreamhost.com": "DreamHost Email Service",
+    "v2soft.com": "V2Soft Custom MTA",
+    "charter.net": "Spectrum / Charter Communications",
+    "eigbox.met": "Custom MTA on Newfold Digital",
     # …add more here
 }
 

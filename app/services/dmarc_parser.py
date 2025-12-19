@@ -65,23 +65,46 @@ class DMARCParser:
 
     def _classify_record(self, record_data: dict) -> Optional[str]:
         """
-        Return a short classification string (e.g., 'forwarded') or None.
+        Return a short classification string
+        (e.g., 'forwarded', 'arc_override') or None.
 
-        Heuristic for forwarding/relaying:
-          - policy SPF = fail
-          - policy DKIM = pass
-          - AND (a DKIM signature looks aligned with header_from  OR a known forwarder signed it)
+        Classifications:
+        - 'arc_override': DMARC failed but message was accepted due to ARC
+        - 'forwarded': likely forwarding / relaying scenario
         """
         try:
             spf_policy = (record_data.get("spf_result") or "").lower()
             dkim_policy = (record_data.get("dkim_result") or "").lower()
+            disposition = (record_data.get("disposition") or "").lower()
+
+            reason_type = (record_data.get("reason_type") or "").lower()
+            reason_comment = (record_data.get("reason_comment") or "").lower()
+
             header_from = (record_data.get("header_from") or "").lower()
             dkim_auth = record_data.get("dkim_auth_results") or []
 
+            # ------------------------------------------------------------
+            # (1) ARC override detection
+            # DMARC failed, but receiver accepted due to ARC
+            # ------------------------------------------------------------
+            if (
+                disposition == "none" and
+                spf_policy == "fail" and
+                dkim_policy == "fail" and
+                reason_type == "local_policy" and
+                "arc=pass" in reason_comment
+            ):
+                return "arc_override"
+
+            # ------------------------------------------------------------
+            # (2) Forwarding / relay heuristic (existing behavior)
+            # ------------------------------------------------------------
             if spf_policy == "fail" and dkim_policy == "pass":
                 # (A) aligned DKIM d= with header_from?
                 aligned_pass = any(
-                    self._relaxed_aligned((item.get("domain") or ""), header_from) and
+                    self._relaxed_aligned(
+                        (item.get("domain") or ""), header_from
+                    ) and
                     (item.get("result") or "").lower() == "pass"
                     for item in dkim_auth
                 )
@@ -93,6 +116,7 @@ class DMARCParser:
                     return "forwarded"
 
             return None
+
         except Exception as e:
             logger.warning(f"Classification failed for record: {e}")
             return None
@@ -182,6 +206,7 @@ class DMARCParser:
                 for record_data in parsed_data.get('records', []):
                     try:
                         email_status, email_status_reason = self._determine_email_status(record_data)
+                        email_status_actual, email_status_reason_actual = self._determine_actual_email_status(record_data)
                         hostname = self.get_hostname(record_data.get('source_ip', ''))
                         email_source = get_email_source(hostname)
                         msg_count = record_data.get('count', 1)
@@ -190,6 +215,8 @@ class DMARCParser:
                             dmarc_report_id=dmarc_report.id,
                             email_status=email_status,
                             email_status_reason=email_status_reason,
+                            email_status_actual=email_status_actual,
+                            email_reason_actual=email_status_reason_actual,
                             email_count=msg_count,
                             source_ip=record_data.get('source_ip'),
                             hostname=hostname,
@@ -199,7 +226,9 @@ class DMARCParser:
                             disposition=record_data.get('disposition'),
                             dkim=record_data.get('dkim_result'),
                             spf=record_data.get('spf_result'),
-                            email_source=email_source
+                            email_source=email_source,
+                            reason_type=record_data.get('reason_type'),
+                            reason_comment=record_data.get('reason_comment')
                         )
                         s.add(detail)
                         # IMPORTANT: flush so detail.id is available for FK on auth rows
@@ -306,6 +335,12 @@ class DMARCParser:
                 disposition = dmarc.text(dmarc.find(policy_eval, "disposition", ns))
                 dkim_result = dmarc.text(dmarc.find(policy_eval, "dkim", ns))
                 spf_result = dmarc.text(dmarc.find(policy_eval, "spf", ns))
+                reason = dmarc.find(policy_eval, "reason", ns)
+                reason_type = None
+                reason_comment = None
+                if reason is not None:
+                    reason_type = dmarc.text(dmarc.find(reason, "type", ns))
+                    reason_comment = dmarc.text(dmarc.find(reason, "comment", ns))
 
                 spf_auth_results = []
                 for spf_auth in dmarc.findall(auth_results, "spf", ns):
@@ -333,6 +368,8 @@ class DMARCParser:
                     "spf_result": spf_result,
                     "spf_auth_results": spf_auth_results,
                     "dkim_auth_results": dkim_auth_results,
+                    "reason_type": reason_type,
+                    "reason_comment": reason_comment,
                 })
 
             return {
@@ -377,7 +414,8 @@ class DMARCParser:
 
     def _determine_email_status(self, record_data: dict) -> tuple:
         """
-        Determine email status and reason based on DMARC record data
+        Determine email status and reason based on DMARC record data and
+        DMARC compliance
 
         Args:
             record_data: Dictionary containing parsed record information
@@ -411,6 +449,52 @@ class DMARCParser:
                 email_status_reason = EmailStatusReason.SPF_FAILED
             elif (disposition == "none" and spf_result == "fail" and
                   dkim_result == "fail"):
+                email_status_reason = EmailStatusReason.SPF_AND_DKIM_FAILED
+            elif disposition == "quarantine":
+                email_status_reason = EmailStatusReason.SPAM
+            elif disposition == "reject":
+                email_status_reason = EmailStatusReason.NOT_DELIVERED
+            else:
+                email_status_reason = EmailStatusReason.MIXED
+
+            return email_status, email_status_reason
+
+        except Exception as e:
+            logger.error(f"Error determining email status: {str(e)}")
+            return EmailStatus.FAILURE, EmailStatusReason.MIXED
+
+    def _determine_actual_email_status(self, record_data: dict) -> tuple:
+        """
+        Determine email status and reason based on DMARC record data, without
+        considering the DMARC rules
+
+        Args:
+            record_data: Dictionary containing parsed record information
+
+        Returns:
+            tuple: (EmailStatus, EmailStatusReason)
+        """
+        try:
+            # Extract values from record_data
+            disposition = record_data.get('disposition', '').lower()
+            dkim_result = record_data.get('dkim_result', '').lower()
+            spf_result = record_data.get('spf_result', '').lower()
+
+            email_status: EmailStatus = EmailStatus.FAILURE
+            email_status_reason: EmailStatusReason = EmailStatusReason.MIXED
+
+            if (disposition == "none"):
+                email_status = EmailStatus.SUCCESS
+            else:
+                email_status = EmailStatus.FAILURE
+
+            if (disposition == "none"):
+                email_status_reason = EmailStatusReason.SUCCESS
+            elif (dkim_result == "fail" and spf_result == "pass"):
+                email_status_reason = EmailStatusReason.DKIM_FAILED
+            elif (spf_result == "fail" and dkim_result == "pass"):
+                email_status_reason = EmailStatusReason.SPF_FAILED
+            elif (spf_result == "fail" and dkim_result == "fail"):
                 email_status_reason = EmailStatusReason.SPF_AND_DKIM_FAILED
             elif disposition == "quarantine":
                 email_status_reason = EmailStatusReason.SPAM
